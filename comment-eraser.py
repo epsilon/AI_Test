@@ -9,3 +9,10 @@ def strip_sql_comments(s):
     return s
 
 final_query_df['query_nocomment'] = final_query_df['query'].map(strip_sql_comments)
+
+per_user = final_query_df.groupby('username').agg(
+    total_queries  = ('sql_template', 'size'),
+    unique_queries = ('sql_template', 'nunique'),
+).sort_values('total_queries', ascending=False)
+
+per_user.head(20)
