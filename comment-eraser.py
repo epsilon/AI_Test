@@ -16,3 +16,19 @@ per_user = final_query_df.groupby('username').agg(
 ).sort_values('total_queries', ascending=False)
 
 per_user.head(20)
+
+import re
+
+KEYWORDS = (r'SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|FULL|CROSS|ON|'
+            r'GROUP|ORDER|HAVING|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT|WITH|'
+            r'AND|OR|VALUES|INSERT|UPDATE|DELETE|SET')
+
+def fix_inline_comments(sql):
+    """-- 주석 뒤에 SQL 키워드가 같은 줄에 붙어있으면 그 앞에 \\n 삽입."""
+    if not isinstance(sql, str):
+        return sql
+    pattern = re.compile(
+        r'(--[^\n]*?)\s+(?=(?:' + KEYWORDS + r')\b)',
+        re.IGNORECASE
+    )
+    return pattern.sub(r'\1\n', sql)
