@@ -90,3 +90,22 @@ spark_df[['prefix_kind', 'prefix_label']] = (
         .size()
         .sort_values(ascending=False)
         .head(20))
+
+import re
+
+SQL_KEYWORDS = ('SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|'
+                'SHOW|DESC|DESCRIBE|USE|SET|EXPLAIN|ALTER|DROP|MERGE|TRUNCATE')
+KW_RE = re.compile(r'\b(' + SQL_KEYWORDS + r')\b', re.IGNORECASE)
+
+def classify_sql_kind(sql):
+    """주석을 모두 제거한 뒤 처음 등장하는 SQL 키워드를 반환."""
+    if not isinstance(sql, str):
+        return None
+    # 블록 주석 /* ... */ 와 라인 주석 -- ... 모두 공백으로 치환
+    s = re.sub(r'/\*.*?\*/', ' ', sql, flags=re.DOTALL)
+    s = re.sub(r'--[^\n]*', ' ', s)
+    m = KW_RE.search(s)
+    return m.group(1).upper() if m else None
+
+spark_df['sql_kind'] = spark_df['paragraph'].map(classify_sql_kind)
+spark_df['sql_kind'].value_counts(dropna=False)
