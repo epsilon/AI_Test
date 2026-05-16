@@ -100,3 +100,43 @@ import json
 with open('join_graph.json','w',encoding='utf-8') as f:
     json.dump(graph, f, ensure_ascii=False)
 print(f"\n테이블 {len(graph['nodes']):,} · 엣지 {len(graph['links']):,} → join_graph.json")
+
+from collections import defaultdict, deque
+
+def add_groups(graph):
+    adj = defaultdict(set)
+    for l in graph['links']:
+        adj[l['source']].add(l['target'])
+        adj[l['target']].add(l['source'])
+    comp, cid = {}, 0
+    for n in graph['nodes']:
+        s = n['id']
+        if s in comp:
+            continue
+        cid += 1
+        q = deque([s]); comp[s] = cid
+        while q:
+            u = q.popleft()
+            for v in adj[u]:
+                if v not in comp:
+                    comp[v] = cid; q.append(v)
+    for n in graph['nodes']:
+        n['group'] = comp[n['id']]
+    return graph
+
+add_groups(graph)
+
+# 그룹 크기 분포 — 이게 핵심 판단 지표
+from collections import Counter
+sizes = Counter(n['group'] for n in graph['nodes'])
+big = sizes.most_common()
+print(f"총 그룹 수: {len(sizes)}")
+for gid, cnt in big[:15]:
+    members = [n['id'] for n in graph['nodes'] if n['group'] == gid]
+    cats = Counter(m.split('.')[0] for m in members if '.' in m)
+    print(f"  G{gid}: {cnt:3d}개  · 주 catalog={dict(cats.most_common(3))}")
+
+import json
+with open('join_graph.json','w',encoding='utf-8') as f:
+    json.dump(graph, f, ensure_ascii=False)
+print("→ group 필드 추가해서 저장")
