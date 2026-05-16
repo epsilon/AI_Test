@@ -51,40 +51,43 @@ import pandas as pd
 plt.rcParams['font.family'] = 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
 
-hour_series = pd.to_datetime(final_query_df['execution_time']).dt.hour
-hourly = final_query_df.groupby(hour_series)['username'].nunique().reindex(range(24), fill_value=0)
+hour_series = pd.to_datetime(final_query_df['execute_time']).dt.hour
+
+# 두 가지 집계
+users_per_hour = final_query_df.groupby(hour_series)['username'].nunique().reindex(range(24), fill_value=0)
+queries_per_hour = final_query_df.groupby(hour_series).size().reindex(range(24), fill_value=0)
 
 angles = np.linspace(0, 2*np.pi, 24, endpoint=False)
-peak_h = hourly.idxmax()
 
-fig, ax = plt.subplots(figsize=(9, 9), subplot_kw={'projection': 'polar'})
+def draw_polar(ax, series, title, accent='#2E5BFF'):
+    peak_h = series.idxmax()
+    colors = [accent if h == peak_h else '#B8C3D9' for h in range(24)]
+    ax.bar(angles, series.values, width=2*np.pi/24*0.9,
+           color=colors, edgecolor='white', linewidth=1.5)
 
-colors = ['#2E5BFF' if h == peak_h else '#B8C3D9' for h in range(24)]
-bars = ax.bar(angles, hourly.values, width=2*np.pi/24*0.9,
-              color=colors, edgecolor='white', linewidth=1.5)
+    ax.set_theta_zero_location('N')
+    ax.set_theta_direction(-1)
+    ax.set_xticks(angles)
+    ax.set_xticklabels([f'{h}시' for h in range(24)], fontsize=9)
+    ax.set_yticklabels([])
+    ax.grid(alpha=0.3)
+    ax.set_ylim(0, series.max() * 1.22)
 
-ax.set_theta_zero_location('N')
-ax.set_theta_direction(-1)
-ax.set_xticks(angles)
-ax.set_xticklabels([f'{h}시' for h in range(24)], fontsize=10)
-ax.set_yticklabels([])
-ax.grid(alpha=0.3)
+    offset = series.max() * 0.08
+    for angle, val, h in zip(angles, series.values, range(24)):
+        if val == 0:
+            continue
+        ax.text(angle, val + offset, f'{val:,}',
+                ha='center', va='center', fontsize=8,
+                fontweight='bold' if h == peak_h else 'normal',
+                color=accent if h == peak_h else '#2A2F45')
 
-# 숫자 라벨 — 0인 시간대는 생략
-offset = hourly.max() * 0.08
-for angle, val, h in zip(angles, hourly.values, range(24)):
-    if val == 0:
-        continue
-    ax.text(angle, val + offset, f'{val:,}',
-            ha='center', va='center', fontsize=9,
-            fontweight='bold' if h == peak_h else 'normal',
-            color='#2E5BFF' if h == peak_h else '#2A2F45')
+    ax.set_title(f'{title}\n피크 {peak_h}시 · {series[peak_h]:,}',
+                 fontsize=12, fontweight='bold', pad=20)
 
-# 라벨이 잘리지 않게 반지름 여유
-ax.set_ylim(0, hourly.max() * 1.20)
-
-ax.set_title(f'시간대별 활성 사용자  ·  피크 {peak_h}시 ({hourly[peak_h]:,}명)',
-             fontsize=13, fontweight='bold', pad=25, loc='center')
+fig, axes = plt.subplots(1, 2, figsize=(16, 8), subplot_kw={'projection': 'polar'})
+draw_polar(axes[0], users_per_hour,   '시간대별 활성 사용자', accent='#2E5BFF')
+draw_polar(axes[1], queries_per_hour, '시간대별 쿼리 수',    accent='#FF6B35')
 
 plt.tight_layout(); plt.show()
 
