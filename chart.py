@@ -54,31 +54,37 @@ plt.rcParams['axes.unicode_minus'] = False
 hour_series = pd.to_datetime(final_query_df['execution_time']).dt.hour
 hourly = final_query_df.groupby(hour_series)['username'].nunique().reindex(range(24), fill_value=0)
 
-# 24시간을 각도로 (0시 = 12시 방향, 시계방향)
 angles = np.linspace(0, 2*np.pi, 24, endpoint=False)
 peak_h = hourly.idxmax()
 
-fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={'projection': 'polar'})
+fig, ax = plt.subplots(figsize=(9, 9), subplot_kw={'projection': 'polar'})
 
-# 피크는 진한 색, 나머지는 연한 색
 colors = ['#2E5BFF' if h == peak_h else '#B8C3D9' for h in range(24)]
-
 bars = ax.bar(angles, hourly.values, width=2*np.pi/24*0.9,
               color=colors, edgecolor='white', linewidth=1.5)
 
-# 시계 방향, 12시(=0시) 위로
 ax.set_theta_zero_location('N')
 ax.set_theta_direction(-1)
-
-# 시간 라벨
 ax.set_xticks(angles)
 ax.set_xticklabels([f'{h}시' for h in range(24)], fontsize=10)
-
-# 반지름축 정리
 ax.set_yticklabels([])
 ax.grid(alpha=0.3)
+
+# 숫자 라벨 — 0인 시간대는 생략
+offset = hourly.max() * 0.08
+for angle, val, h in zip(angles, hourly.values, range(24)):
+    if val == 0:
+        continue
+    ax.text(angle, val + offset, f'{val:,}',
+            ha='center', va='center', fontsize=9,
+            fontweight='bold' if h == peak_h else 'normal',
+            color='#2E5BFF' if h == peak_h else '#2A2F45')
+
+# 라벨이 잘리지 않게 반지름 여유
+ax.set_ylim(0, hourly.max() * 1.20)
 
 ax.set_title(f'시간대별 활성 사용자  ·  피크 {peak_h}시 ({hourly[peak_h]:,}명)',
              fontsize=13, fontweight='bold', pad=25, loc='center')
 
 plt.tight_layout(); plt.show()
+
