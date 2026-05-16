@@ -91,3 +91,79 @@ print('═══ Top 20 사용자 분류 ═══')
 print(result_df.head(20)[['username', 'total_queries', 'shape',
                           'business_share', 'night_share', 'peak_hours']]
       .to_string(index=False))
+
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+plt.rcParams['font.family'] = 'Malgun Gothic'
+plt.rcParams['axes.unicode_minus'] = False
+
+# 분류별 색
+SHAPE_COLORS = {
+    '업무시간형':            '#2E5BFF',
+    '업무시간 중심+일부 야간': '#5B8DEF',
+    '야간 집중형':           '#FF6B35',
+    '24시간 평탄형':         '#9B59B6',
+    '쌍봉형':               '#16A085',
+    '단일 피크형':           '#E67E22',
+    '혼합형':               '#95A5A6',
+    '데이터 없음':           '#D0D5DD',
+}
+
+# result_df 순서(쿼리 많은 순)대로 그림
+order = result_df['username'].tolist()
+shape_map = dict(zip(result_df['username'], result_df['shape']))
+total_map = dict(zip(result_df['username'], result_df['total_queries']))
+
+NCOLS = 4
+PER_PAGE = 28               # 페이지당 7행 x 4열
+n = len(order)
+n_pages = int(np.ceil(n / PER_PAGE))
+
+print(f'총 {n}명 · {n_pages}페이지로 출력')
+
+for page in range(n_pages):
+    chunk = order[page*PER_PAGE : (page+1)*PER_PAGE]
+    nrows = int(np.ceil(len(chunk) / NCOLS))
+
+    fig, axes = plt.subplots(nrows, NCOLS,
+                             figsize=(NCOLS*4, nrows*2.6),
+                             squeeze=False)
+
+    for idx, user in enumerate(chunk):
+        ax = axes[idx // NCOLS][idx % NCOLS]
+        vals = pivot.loc[user].reindex(range(24), fill_value=0).values
+        shape = shape_map[user]
+        color = SHAPE_COLORS.get(shape, '#95A5A6')
+
+        ax.bar(range(24), vals, color=color, width=0.85)
+
+        # 피크 시간 점선
+        peak_h = int(np.argmax(vals))
+        ax.axvline(peak_h, color=color, linestyle='--', alpha=0.4, linewidth=1)
+
+        ax.set_title(f'{user}\n{shape} · {total_map[user]:,}건 · 피크 {peak_h}시',
+                     fontsize=9, fontweight='bold', pad=6)
+        ax.set_xlim(-0.5, 23.5)
+        ax.set_xticks([0, 6, 12, 18])
+        ax.set_xticklabels(['0', '6', '12', '18'], fontsize=7)
+        ax.tick_params(axis='y', labelsize=7)
+        for s in ['top', 'right']:
+            ax.spines[s].set_visible(False)
+
+    # 남는 칸 숨기기
+    for j in range(len(chunk), nrows*NCOLS):
+        axes[j // NCOLS][j % NCOLS].axis('off')
+
+    # 범례 (페이지마다 상단)
+    handles = [plt.Rectangle((0,0),1,1, color=c) for c in SHAPE_COLORS.values()]
+    fig.legend(handles, SHAPE_COLORS.keys(), loc='upper center',
+               ncol=len(SHAPE_COLORS), frameon=False, fontsize=8,
+               bbox_to_anchor=(0.5, 1.0))
+
+    fig.suptitle(f'계정별 시간대 분포  ·  {page+1}/{n_pages} 페이지',
+                 fontsize=13, fontweight='bold', y=1.0, x=0.02, ha='left')
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()
+
