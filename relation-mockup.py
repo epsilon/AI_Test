@@ -3,16 +3,29 @@ from sqlglot import exp
 from sqlglot.optimizer.scope import build_scope
 import pandas as pd
 
+def _base_tables(scope):
+    """이 스코프(또는 CTE 스코프)가 최종적으로 의존하는 실제 베이스 테이블 fq 집합."""
+    out = set()
+    for src_name, src in scope.sources.items():
+        if isinstance(src, exp.Table):
+            out.add('.'.join(p for p in (src.catalog, src.db, src.name) if p))
+        else:
+            # 서브쿼리/CTE 스코프 → 재귀로 내부 베이스까지
+            try:
+                out |= _base_tables(src)
+            except Exception:
+                pass
+    return out
+
 def extract_join_pairs(sql, dialect='spark'):
-    """scope 기반. 접두어 명시 + 실제 테이블로 해소되는 JOIN 페어만 채택."""
-    st = {'eq_cols': 0, 'resolved': 0, 'no_prefix': 0, 'derived': 0, 'unknown': 0}
+    st = {'eq_cols':0,'resolved':0,'no_prefix':0,'cte_unwrapped':0,
+          'multi_ambig':0,'unknown':0}
     try:
         tree = sqlglot.parse_one(sql, read=dialect)
     except Exception as e:
         return {'pairs': [], 'stats': st, 'error': str(e)}
     if tree is None:
         return {'pairs': [], 'stats': st, 'error': 'empty'}
-
     try:
         root = build_scope(tree)
     except Exception as e:
@@ -21,23 +34,29 @@ def extract_join_pairs(sql, dialect='spark'):
         return {'pairs': [], 'stats': st, 'error': 'no scope'}
 
     def resolve(col, scope):
-        """컬럼 → (풀네임 or None, 사유). 접두어 없으면 no_prefix, 파생소스면 derived."""
+        """컬럼 → 실제 테이블 fq 리스트. CTE/서브쿼리면 내부 베이스로 펼침."""
         pref = col.table
         if not pref:
-            return None, 'no_prefix'
+            return [], 'no_prefix'
         src = scope.sources.get(pref)
         if src is None:
-            return None, 'unknown'
-        if isinstance(src, exp.Table):                       # 실제 베이스 테이블
-            return '.'.join(p for p in (src.catalog, src.db, src.name) if p), 'resolved'
-        return None, 'derived'                                # 서브쿼리/CTE 스코프
+            return [], 'unknown'
+        if isinstance(src, exp.Table):
+            return ['.'.join(p for p in (src.catalog, src.db, src.name) if p)], 'resolved'
+        # CTE 또는 파생 스코프 → 내부 베이스 테이블로 unwrap
+        bases = _base_tables(src)
+        if not bases:
+            return [], 'unknown'
+        if len(bases) == 1:
+            return [next(iter(bases))], 'cte_unwrapped'
+        return list(bases), 'multi_ambig'   # CTE 안에서 이미 join된 경우 다중
 
     pairs = []
     for scope in root.traverse():
         sel = scope.expression
         if not isinstance(sel, exp.Select):
             continue
-        for j in (sel.args.get('joins') or []):              # 이 스코프 레벨 JOIN만
+        for j in (sel.args.get('joins') or []):
             on = j.args.get('on')
             if on is None:
                 continue
@@ -46,16 +65,20 @@ def extract_join_pairs(sql, dialect='spark'):
                 if not (isinstance(l, exp.Column) and isinstance(r, exp.Column)):
                     continue
                 st['eq_cols'] += 2
-                lt, lr = resolve(l, scope)
-                rt, rr = resolve(r, scope)
+                lts, lr = resolve(l, scope)
+                rts, rr = resolve(r, scope)
                 st[lr] += 1; st[rr] += 1
-                if lr == 'resolved': st['resolved'] -= 0     # (가독성용 noop)
-                if not lt or not rt or lt == rt:
+                if not lts or not rts:
                     continue
-                a, b = (lt, l.name), (rt, r.name)
-                if a > b:
-                    a, b = b, a
-                pairs.append((a[0], a[1], b[0], b[1]))
+                # 다중(ambiguous)이면 모든 조합을 약하게 잇기보단,
+                # 단일로 해소된 쪽이 있을 때만 명확한 페어 생성
+                for lt in lts:
+                    for rt in rts:
+                        if lt and rt and lt != rt:
+                            a, b = (lt, l.name), (rt, r.name)
+                            if a > b:
+                                a, b = b, a
+                            pairs.append((a[0], a[1], b[0], b[1]))
     return {'pairs': pairs, 'stats': st, 'error': None}
 
 
