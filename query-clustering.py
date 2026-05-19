@@ -53,3 +53,17 @@ clusters = (
 )
 
 clusters.head(20)
+
+d = starrocks_df
+n = len(d)
+print("note_id 채움률      :", d['note_id'].notna().mean() if 'note_id' in d else "컬럼없음")
+print("paragraph_id 채움률 :", d['paragraph_id'].notna().mean() if 'paragraph_id' in d else "컬럼없음")
+print("노트당 평균 쿼리 수  :",
+      round(d.groupby('note_id').size().mean(),1) if 'note_id' in d else "-")
+print("쿼리>=2인 노트 비율  :",
+      round((d.groupby('note_id').size()>=2).mean(),2) if 'note_id' in d else "-")
+# paragraph_id가 순서를 담는지 — 한 노트 안에서 단조증가/정렬 가능한지
+if 'note_id' in d and 'paragraph_id' in d:
+    smp = d[d['note_id']==d['note_id'].dropna().iloc[0]][['paragraph_id','execute_time']]
+    print("\n샘플 노트의 paragraph_id 값:\n", smp.head(10).to_string(index=False))
+
