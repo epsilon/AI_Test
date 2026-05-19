@@ -162,3 +162,12 @@ print("\n── 작업 종착점 Top 10 (노트가 여기서 끝남) ──")
 for t, c in ends.most_common(10):
     print(f"  {t:<32} {c}")
 
+raw = sum(len(s)-1 for s in seqs)
+comp_sum = sum(
+    len([seq[0]] + [t for t in seq[1:] if t != ([seq[0]]+[x for x in seq[1:]])[-1]])
+    for seq in seqs) if False else sum(
+    (lambda c=[s[0]]: [c.append(t) for t in s[1:] if t!=c[-1]] and len(c) or len(c))()
+    for s in seqs)
+print(f"압축 전 전이 {raw:,} → 압축 후 {sum(len(set(zip(s,s[1:]))) for s in seqs):,}")
+print("노트별 고유 대표테이블 수 분포:",
+      pd.Series([len(set(s)) for s in seqs]).describe()[['mean','50%','max']].to_dict())
