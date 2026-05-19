@@ -275,3 +275,19 @@ print(f"시스템 스키마 포함 쿼리 행: {hit_rows:,} / {len(starrocks_df)
 print(f"시스템 테이블 종류: {len(sys_tbls)}")
 for t, c in sys_tbls.most_common(15):
     print(f"  {t:<55} {c:,}")
+
+import re
+SYS_RE = re.compile(
+    r'(^|\.)(information_schema|performance_schema|sys|pg_catalog|'
+    r'mysql|sys_catalog|_statistics)(\.|$)', re.I)
+
+def fqset(tbls):
+    if not isinstance(tbls, list):
+        return set()
+    out = set()
+    for x in tbls:
+        if isinstance(x, tuple) and any(x):
+            fqn = '.'.join(p for p in x if p)
+            if not SYS_RE.search(fqn):      # ← 시스템 스키마 제외
+                out.add(fqn)
+    return out
