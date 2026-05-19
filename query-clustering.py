@@ -251,3 +251,27 @@ print("\n── 분석 진입 테이블 Top 10 ──")
 for t,c in starts.most_common(10): print(f"  {t:<32} {c}")
 print("\n── 분석 종착 테이블 Top 10 ──")
 for t,c in ends.most_common(10):   print(f"  {t:<32} {c}")
+
+import re
+SYS_RE = re.compile(
+    r'(^|\.)(information_schema|performance_schema|sys|pg_catalog|'
+    r'mysql|sys_catalog|_statistics)(\.|$)', re.I)
+
+def is_sys(fqn):
+    return bool(SYS_RE.search(fqn or ''))
+
+# tables 컬럼 안에 시스템 스키마가 얼마나 끼어있나
+hit_rows = 0; sys_tbls = Counter()
+for lst in starrocks_df['tables']:
+    if isinstance(lst, list):
+        names = {'.'.join(p for p in x if p) for x in lst if isinstance(x,tuple) and any(x)}
+        s = {n for n in names if is_sys(n)}
+        if s:
+            hit_rows += 1
+            sys_tbls.update(s)
+
+print(f"시스템 스키마 포함 쿼리 행: {hit_rows:,} / {len(starrocks_df):,} "
+      f"({hit_rows/len(starrocks_df):.1%})")
+print(f"시스템 테이블 종류: {len(sys_tbls)}")
+for t, c in sys_tbls.most_common(15):
+    print(f"  {t:<55} {c:,}")
