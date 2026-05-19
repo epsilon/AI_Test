@@ -171,3 +171,83 @@ comp_sum = sum(
 print(f"압축 전 전이 {raw:,} → 압축 후 {sum(len(set(zip(s,s[1:]))) for s in seqs):,}")
 print("노트별 고유 대표테이블 수 분포:",
       pd.Series([len(set(s)) for s in seqs]).describe()[['mean','50%','max']].to_dict())
+
+import json
+import pandas as pd
+from collections import Counter, defaultdict
+
+d = starrocks_df.copy()
+assert 'tables' in d.columns, "tables 컬럼 필요"
+
+def fqset(tbls):
+    """쿼리 1건이 건드린 테이블 집합."""
+    if not isinstance(tbls, list):
+        return set()
+    return {'.'.join(p for p in x if p) for x in tbls
+            if isinstance(x, tuple) and any(x)}
+
+d['_t']  = pd.to_datetime(d['execute_time'], errors='coerce')
+d['_set'] = d['tables'].map(fqset)
+
+GFREQ = Counter()
+for s in d['_set']:
+    GFREQ.update(s)
+
+# ── 노트별: 시간순으로 "새로 등장한 테이블"을 흐름 스텝으로 ──
+seqs = []          # 노트별 [신규등장 테이블, ...]
+seen_sets = []     # (디버그용) 노트별 누적
+for nid, g in d[d['_set'].map(bool)].groupby('note_id'):
+    g = g.sort_values('_t', kind='stable')
+    seen = set()
+    step = []
+    for s in g['_set']:
+        new = s - seen          # 이번 쿼리에서 처음 등장한 테이블
+        if new:
+            # 같은 쿼리에 여러 개 새로 들어오면 freq 높은 순으로 펼침
+            for t in sorted(new, key=lambda x: -GFREQ.get(x, 0)):
+                step.append(t)
+            seen |= s
+    if len(step) >= 2:
+        seqs.append(step)
+
+print(f"세트(노트) 수: {len(seqs):,}  ·  평균 흐름 길이: "
+      f"{sum(len(s) for s in seqs)/max(len(seqs),1):.1f}")
+print("노트별 흐름 길이 분포:",
+      pd.Series([len(s) for s in seqs]).describe()[['mean','50%','max']].round(1).to_dict())
+
+# ── 전이 집계 (A→B = A 등장 후 B가 새로 합류) ──
+trans = Counter()
+note_pairs = defaultdict(set)
+for i, seq in enumerate(seqs):
+    for a, b in zip(seq, seq[1:]):
+        if a != b:
+            trans[(a, b)] += 1
+            note_pairs[(a, b)].add(i)
+
+nodes = sorted({t for ab in trans for t in ab})
+out_deg = Counter(a for a, _ in trans)
+in_deg  = Counter(b for _, b in trans)
+graph_flow = {
+  'nodes': [{'id': n, 'out': int(out_deg.get(n,0)),
+             'in': int(in_deg.get(n,0)),
+             'total': int(GFREQ.get(n,0))} for n in nodes],
+  'links': [{'source': a, 'target': b, 'freq': int(c),
+             'notes': len(note_pairs[(a,b)])}
+            for (a,b), c in trans.items()]
+}
+with open('usage_flow.json','w',encoding='utf-8') as f:
+    json.dump(graph_flow, f, ensure_ascii=False)
+print(f"흐름 노드 {len(nodes):,} · 전이 엣지 {len(graph_flow['links']):,} → usage_flow.json")
+
+# ── 핵심 흐름 (노트 수 = 신뢰도) ──
+top = sorted(graph_flow['links'], key=lambda x:(x['notes'],x['freq']), reverse=True)[:25]
+print("\n═══ 반복되는 분석 전개 Top 25 (노트수 · 빈도) ═══")
+for l in top:
+    print(f"  {l['source']:<28} → {l['target']:<28} 노트 {l['notes']:>3} · 빈도 {l['freq']:>4}")
+
+starts = Counter(s[0]  for s in seqs)
+ends   = Counter(s[-1] for s in seqs)
+print("\n── 분석 진입 테이블 Top 10 ──")
+for t,c in starts.most_common(10): print(f"  {t:<32} {c}")
+print("\n── 분석 종착 테이블 Top 10 ──")
+for t,c in ends.most_common(10):   print(f"  {t:<32} {c}")
