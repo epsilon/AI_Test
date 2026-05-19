@@ -82,26 +82,35 @@ def extract_join_pairs(sql, dialect='spark'):
     return {'pairs': pairs, 'stats': st, 'error': None}
 
 
+import json
+import pandas as pd
+from collections import Counter, defaultdict, deque
+
+# ── 1. 적용 ──
 col = 'query_nocomment' if 'query_nocomment' in final_query_df.columns else 'query'
 src = final_query_df[['username', col]].dropna(subset=[col]).copy()
 res = src[col].map(extract_join_pairs)
 src['pairs'] = res.map(lambda d: d['pairs'])
 
-# ── 해소불가 진단 (전체 합산) ──
-agg = {'eq_cols':0,'resolved':0,'no_prefix':0,'derived':0,'unknown':0}
+# ── 2. 해소 진단 (Counter라 어떤 stats 키가 와도 KeyError 없음) ──
+agg = Counter()
 for s in res.map(lambda d: d['stats']):
-    for k in agg: agg[k] += s[k]
+    agg.update(s)
 
-tot = agg['eq_cols'] or 1
+tot = agg.get('eq_cols', 0) or 1
+def line(k, label):
+    print(f"  {label:<18}: {agg.get(k,0):,}  ({agg.get(k,0)/tot:.1%})")
+
 print("═══ JOIN ON 컬럼 참조 해소 결과 ═══")
-print(f"총 컬럼 참조      : {agg['eq_cols']:,}")
-print(f"  해소 성공       : {agg['resolved']:,}  ({agg['resolved']/tot:.1%})")
-print(f"  접두어 없음     : {agg['no_prefix']:,}  ({agg['no_prefix']/tot:.1%})  ← 스키마 있어야 풀림")
-print(f"  파생소스(CTE등) : {agg['derived']:,}  ({agg['derived']/tot:.1%})")
-print(f"  미상 alias      : {agg['unknown']:,}  ({agg['unknown']/tot:.1%})")
-print(f"파싱 실패 쿼리    : {res.map(lambda d: d['error'] is not None).sum():,}건")
+print(f"총 컬럼 참조        : {agg.get('eq_cols',0):,}")
+line('resolved',      '해소 성공')
+line('cte_unwrapped', 'CTE 펼침 성공')      # ← w 가 실제 테이블로 풀린 수
+line('no_prefix',     '접두어 없음')         # 스키마 있어야 풀림
+line('multi_ambig',   'CTE 내부 다중모호')   # WITH w AS (a JOIN b) 형태
+line('unknown',       '미상 alias')
+print(f"파싱 실패 쿼리      : {res.map(lambda d: d['error'] is not None).sum():,}건")
 
-# ── 그래프 재생성 (해소된 페어만) ──
+# ── 3. 그래프 생성 (해소된 페어만) ──
 ex = src[['username','pairs']]
 ex = ex[ex['pairs'].map(lambda x: isinstance(x,list) and len(x)>0)].explode('pairs')
 ex[['tA','cA','tB','cB']] = pd.DataFrame(ex['pairs'].tolist(), index=ex.index)
@@ -109,30 +118,28 @@ ex[['tA','cA','tB','cB']] = pd.DataFrame(ex['pairs'].tolist(), index=ex.index)
 edges = (ex.groupby(['tA','cA','tB','cB'])
            .agg(freq=('username','size'), users=('username','nunique'))
            .reset_index())
+
 deg = pd.concat([edges[['tA','freq']].rename(columns={'tA':'id'}),
                  edges[['tB','freq']].rename(columns={'tB':'id'})])
 node_stat = deg.groupby('id')['freq'].sum().to_dict()
-node_deg = pd.concat([edges['tA'], edges['tB']]).value_counts().to_dict()
+node_deg  = pd.concat([edges['tA'], edges['tB']]).value_counts().to_dict()
 
 graph = {
-  'nodes':[{'id':n,'freq':int(node_stat[n]),'degree':int(node_deg[n])} for n in sorted(node_stat)],
+  'nodes':[{'id':n,'freq':int(node_stat[n]),'degree':int(node_deg[n])}
+           for n in sorted(node_stat)],
   'links':[{'source':r.tA,'target':r.tB,'colA':r.cA,'colB':r.cB,
-            'freq':int(r.freq),'users':int(r.users)} for r in edges.itertuples()]
+            'freq':int(r.freq),'users':int(r.users)}
+           for r in edges.itertuples()]
 }
-import json
-with open('join_graph.json','w',encoding='utf-8') as f:
-    json.dump(graph, f, ensure_ascii=False)
-print(f"\n테이블 {len(graph['nodes']):,} · 엣지 {len(graph['links']):,} → join_graph.json")
 
-from collections import defaultdict, deque
-
-def add_groups(graph):
+# ── 4. 연결요소 그룹 부여 ──
+def add_groups(g):
     adj = defaultdict(set)
-    for l in graph['links']:
+    for l in g['links']:
         adj[l['source']].add(l['target'])
         adj[l['target']].add(l['source'])
     comp, cid = {}, 0
-    for n in graph['nodes']:
+    for n in g['nodes']:
         s = n['id']
         if s in comp:
             continue
@@ -143,23 +150,33 @@ def add_groups(graph):
             for v in adj[u]:
                 if v not in comp:
                     comp[v] = cid; q.append(v)
-    for n in graph['nodes']:
+    for n in g['nodes']:
         n['group'] = comp[n['id']]
-    return graph
+    return g
 
 add_groups(graph)
 
-# 그룹 크기 분포 — 이게 핵심 판단 지표
-from collections import Counter
-sizes = Counter(n['group'] for n in graph['nodes'])
-big = sizes.most_common()
-print(f"총 그룹 수: {len(sizes)}")
-for gid, cnt in big[:15]:
-    members = [n['id'] for n in graph['nodes'] if n['group'] == gid]
-    cats = Counter(m.split('.')[0] for m in members if '.' in m)
-    print(f"  G{gid}: {cnt:3d}개  · 주 catalog={dict(cats.most_common(3))}")
-
-import json
+# ── 5. 저장 ──
 with open('join_graph.json','w',encoding='utf-8') as f:
     json.dump(graph, f, ensure_ascii=False)
-print("→ group 필드 추가해서 저장")
+
+# ── 6. 그룹 분포 (핵심 판단 지표) ──
+sizes = Counter(n['group'] for n in graph['nodes'])
+gmem  = defaultdict(list)
+for n in graph['nodes']:
+    gmem[n['group']].append(n['id'])
+
+print(f"\n테이블 {len(graph['nodes']):,} · 엣지 {len(graph['links']):,} · 그룹 {len(sizes)}개")
+top = sizes.most_common(1)[0][1] if sizes else 0
+print(f"최대 그룹 비중: {top}/{len(graph['nodes'])} "
+      f"({top/max(len(graph['nodes']),1):.0%})")
+print("\n── 그룹 상위 15 ──")
+for gid, cnt in sizes.most_common(15):
+    cats = Counter(m.split('.')[0] for m in gmem[gid] if '.' in m)
+    print(f"  G{gid}: {cnt:3d}개 · 주 catalog={dict(cats.most_common(3))}")
+
+# ── 7. w 잔존 점검 (전처리 검증) ──
+short = sorted([n['id'] for n in graph['nodes']
+                if '.' not in n['id'] and len(n['id']) <= 2])
+print(f"\n한 글자/점없는 의심 노드 {len(short)}개: {short[:20]}")
+print("→ 비어 있으면 CTE 펼침 정상. w/a/b 등이 보이면 아직 잔존")
