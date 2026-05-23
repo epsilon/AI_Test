@@ -131,3 +131,9 @@ longest = max(sessions, key=lambda s: len(s['records']))
 print('\n가장 긴 세션:', longest['service'])
 for r in longest['records']:
     print(' ', r['logger'])
+
+with open('top10_templates.txt', 'w', encoding='utf-8') as f:
+    for i, (sig, cnt) in enumerate(sig_counter.most_common(10), 1):
+        f.write(f'\n=== #{i} [{cnt}회, {len(sig)}라인] ===\n')
+        for logger in sig:
+            f.write(f'  {logger}\n')
