@@ -74,4 +74,30 @@ def group_sessions(path):
 sessions = group_sessions('your_log_path.log')
 print(f'{len(sessions)} sessions')
 sessions[0]  # 한 세션 살펴보기
-(
+
+# 1) 어휘 79종 CSV 저장 (samples는 길어서 따로 빼고)
+vocab[['logger', 'count']].to_csv('vocab.csv', index=False)
+
+# 2) 세션 요약 DataFrame
+sess_df = pd.DataFrame([
+    {
+        'guid': s['guid'],
+        'service': s['service'],
+        'n_records': len(s['records']),
+        'thread': s['thread'],
+        'start_ts': s['start_ts'],
+    }
+    for s in sessions
+])
+sess_df.to_csv('sessions_summary.csv', index=False)
+
+# 3) 화면 확인
+print('=== 서비스별 호출 수 top 20 ===')
+print(sess_df['service'].value_counts(dropna=False).head(20))
+
+print('\n=== 세션당 라인 수 분포 ===')
+print(sess_df['n_records'].describe())
+
+print('\n=== GUID/service 누락 세션 ===')
+print('guid 없음:', sess_df['guid'].isna().sum())
+print('service 없음:', sess_df['service'].isna().sum())
