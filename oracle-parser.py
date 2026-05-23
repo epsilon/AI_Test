@@ -137,3 +137,19 @@ with open('top10_templates.txt', 'w', encoding='utf-8') as f:
         f.write(f'\n=== #{i} [{cnt}회, {len(sig)}라인] ===\n')
         for logger in sig:
             f.write(f'  {logger}\n')
+
+
+# SQL 발생 세션만 추출 → (service, sql) pair
+sql_records = []
+for s in sessions:
+    sqls = [r['message'] for r in s['records'] 
+            if 'LoggingPlugin#logStatement' in r['logger']]
+    for sql in sqls:
+        sql_records.append({
+            'guid': s['guid'],
+            'service': s['service'],
+            'sql': sql,
+        })
+
+print(len(sql_records), '개 SQL 추출')
+pd.DataFrame(sql_records).to_csv('service_sql_pairs.csv', index=False)
