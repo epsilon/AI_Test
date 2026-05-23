@@ -101,3 +101,33 @@ print(sess_df['n_records'].describe())
 print('\n=== GUID/service 누락 세션 ===')
 print('guid 없음:', sess_df['guid'].isna().sum())
 print('service 없음:', sess_df['service'].isna().sum())
+
+# A) 1위 서비스 확인 + logger 시퀀스 템플릿 추출
+top_service = sess_df['service'].value_counts().index[0]
+print('TOP:', top_service)
+
+def session_signature(s):
+    # logger 시퀀스를 튜플로 — 같은 시퀀스면 같은 템플릿
+    return tuple(r['logger'] for r in s['records'])
+
+sig_counter = Counter(session_signature(s) for s in sessions)
+print(f'\n총 {len(sig_counter)}개 템플릿')
+for sig, cnt in sig_counter.most_common(10):
+    print(f'\n[{cnt}회] {len(sig)}라인')
+    for logger in sig:
+        print(f'  {logger}')
+
+# B) outlier 세션 직접 보기
+short = [s for s in sessions if len(s['records']) == 1]
+long = [s for s in sessions if len(s['records']) >= 20]
+print(f'1라인 세션 {len(short)}개, 20+라인 세션 {len(long)}개')
+
+# 1라인짜리 샘플
+for s in short[:3]:
+    print(s['service'], '|', s['records'][0]['logger'], '|', s['records'][0]['message'][:200])
+
+# 가장 긴 세션 logger 시퀀스
+longest = max(sessions, key=lambda s: len(s['records']))
+print('\n가장 긴 세션:', longest['service'])
+for r in longest['records']:
+    print(' ', r['logger'])
