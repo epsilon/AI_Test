@@ -189,3 +189,19 @@ df[['datasource', 'sql_clean']] = df['sql'].apply(
 
 # datasource 분포 확인
 print(df['datasource'].value_counts(dropna=False))
+
+# 속성 파악
+sql_records_v2 = []
+for s in sessions:
+    for r in s['records']:
+        if 'LoggingPlugin#logStatement' in r['logger']:
+            ds, sql = split_sql(r['message'])
+            sql_records_v2.append({
+                'guid': s['guid'],
+                'service': s['service'],
+                'datasource': ds,
+                'sql': sql,
+            })
+
+# prefix를 섞어서 사용하는지 여부 파악
+df.groupby('service')['datasource'].value_counts().head(20)
