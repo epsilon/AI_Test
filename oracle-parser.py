@@ -379,3 +379,49 @@ df.sort_values('start_ts').groupby(['ip','port']).tail(1) \
 sample = df[df['ip']=='10.145.77.61'].iloc[0]
 for ds, sql in zip(sample['datasources'], sample['sqls']):
     print(f'[{ds}] {sql[:200]}')
+
+# 시간 내용 추가
+import re
+
+CACHE_RE = re.compile(r'(.+?) is (Noot Exist|Not Exist|Exist) in Cache')
+
+def session_to_row(s):
+    head = s['records'][0]
+    m = CLIENT_RE.search(head['message'])
+    ip, port = (m.group(1), m.group(2)) if m else (None, None)
+
+    cache, cache_key = None, None
+    for r in s['records']:
+        if 'MonitoringCache#get' in r['logger']:
+            cm = CACHE_RE.search(r['message'])
+            if cm:
+                cache_key = cm.group(1).strip()
+                cache = 'hit' if cm.group(2) == 'Exist' else 'miss'
+            break
+
+    datasources, sqls = [], []
+    for r in s['records']:
+        if 'LoggingPlugin#logStatement' in r['logger']:
+            pm = PREFIX_RE.match(r['message'])
+            if pm:
+                datasources.append(pm.group(1))
+                sqls.append(pm.group(2).strip())
+            else:
+                datasources.append(None)
+                sqls.append(r['message'].strip())
+
+    return {
+        'ip': ip, 'port': port,
+        'function': s['service'],
+        'start_ts': head['ts'], 'end_ts': s['records'][-1]['ts'],
+        'thread': s['thread'], 'guid': s['guid'],
+        'cache': cache, 'cache_key': cache_key,
+        'n_sqls': len(sqls),
+        'datasources': datasources, 'sqls': sqls,
+    }
+
+df = pd.DataFrame([session_to_row(s) for s in sessions])
+df['start_ts'] = pd.to_datetime(df['start_ts'], format='%Y-%m-%d %H:%M:%S,%f')
+df['end_ts']   = pd.to_datetime(df['end_ts'],   format='%Y-%m-%d %H:%M:%S,%f')
+df['duration_ms'] = (df['end_ts'] - df['start_ts']).dt.total_seconds() * 1000
+df = df.sort_values('start_ts').reset_index(drop=True)
