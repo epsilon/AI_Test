@@ -153,3 +153,23 @@ for s in sessions:
 
 print(len(sql_records), '개 SQL 추출')
 pd.DataFrame(sql_records).to_csv('service_sql_pairs.csv', index=False)
+
+# 5/25 parsing 성공율
+import sqlglot
+from sqlglot import exp
+
+def extract_tables(sql):
+    try:
+        parsed = sqlglot.parse_one(sql, dialect='oracle')
+        return list({t.name for t in parsed.find_all(exp.Table)})
+    except Exception:
+        return None  # 파싱 실패는 따로 카운트
+
+# sql_records: 셀에서 만들었던 12,099개 list
+import pandas as pd
+df = pd.DataFrame(sql_records)
+df['tables'] = df['sql'].apply(extract_tables)
+
+print('파싱 실패:', df['tables'].isna().sum())
+print('테이블 추출 예시:')
+print(df[['service', 'tables']].head(10))
