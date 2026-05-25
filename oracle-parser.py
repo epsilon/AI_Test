@@ -173,3 +173,19 @@ df['tables'] = df['sql'].apply(extract_tables)
 print('파싱 실패:', df['tables'].isna().sum())
 print('테이블 추출 예시:')
 print(df[['service', 'tables']].head(10))
+
+# prefix 제거
+import re
+
+def split_sql(msg):
+    m = re.match(r'\s*\[([^\]]+)\]\s*(.*)', msg, re.DOTALL)
+    if m:
+        return m.group(1), m.group(2).strip()
+    return None, msg.strip()
+
+df[['datasource', 'sql_clean']] = df['sql'].apply(
+    lambda x: pd.Series(split_sql(x))
+)
+
+# datasource 분포 확인
+print(df['datasource'].value_counts(dropna=False))
