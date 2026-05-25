@@ -205,3 +205,15 @@ for s in sessions:
 
 # prefix를 섞어서 사용하는지 여부 파악
 df.groupby('service')['datasource'].value_counts().head(20)
+
+# 모델 다시 확인
+def extract_tables(sql):
+    try:
+        parsed = sqlglot.parse_one(sql, dialect='oracle')
+        return list({t.name for t in parsed.find_all(exp.Table)})
+    except Exception:
+        return None
+
+df['tables'] = df['sql_clean'].apply(extract_tables)
+print('파싱 실패:', df['tables'].isna().sum(), '/', len(df))
+print(df[['service', 'datasource', 'tables']].head(10))
