@@ -217,3 +217,59 @@ def extract_tables(sql):
 df['tables'] = df['sql_clean'].apply(extract_tables)
 print('파싱 실패:', df['tables'].isna().sum(), '/', len(df))
 print(df[['service', 'datasource', 'tables']].head(10))
+
+#service entity 만들기
+from collections import defaultdict, Counter
+
+# 1) 파싱 성공만
+ok = df.dropna(subset=['tables']).copy()
+ok['tables'] = ok['tables'].apply(lambda x: [t.lower() for t in x])  # 정규화
+
+# 2) 서비스 단위 집계 — business_calls는 session 기반, db_calls는 SQL 발생 기반
+# session 기반 카운트 (캐시 hit 포함)
+service_business = Counter(s['service'] for s in sessions)
+# SQL 발생 카운트 (DB까지 내려온 호출)
+service_db = ok.groupby('service').size()
+
+# 3) (service, datasource, table) 호출 수
+# 한 SQL row의 tables 리스트 explode → 각 테이블에 1씩 attribute (Equal attribution)
+exploded = ok.explode('tables').rename(columns={'tables': 'table'})
+service_table_calls = (
+    exploded.groupby(['service', 'datasource', 'table'])
+    .size()
+    .reset_index(name='calls')
+)
+
+# 4) service entity 빌드
+services = {}
+for svc, group in service_table_calls.groupby('service'):
+    biz = service_business.get(svc, 0)
+    db = int(service_db.get(svc, 0))
+    services[svc] = {
+        '_source': 'smartpms_log',
+        '_inferred': True,
+        'business_calls': biz,
+        'db_calls': db,
+        'cache_hit_rate': round(1 - db / biz, 3) if biz > 0 else None,
+        'tables_used': group[['datasource', 'table', 'calls']].to_dict('records'),
+    }
+
+# 5) table entity 빌드 (usage 블록)
+tables = defaultdict(lambda: {'db_calls': 0, 'used_by_services': []})
+for _, row in service_table_calls.iterrows():
+    key = (row['datasource'], row['table'])
+    tables[key]['db_calls'] += row['calls']
+    tables[key]['used_by_services'].append({
+        'service': row['service'],
+        'calls': int(row['calls']),
+    })
+
+# 6) 검증용 출력
+print('서비스 entity:', len(services))
+print('테이블 entity:', len(tables))
+print('\n=== top 서비스 ===')
+for svc, info in sorted(services.items(), key=lambda x: -x[1]['business_calls'])[:5]:
+    print(f"{svc}: biz={info['business_calls']}, db={info['db_calls']}, cache={info['cache_hit_rate']}")
+print('\n=== top 테이블 (db_calls 기준) ===')
+for (ds, t), info in sorted(tables.items(), key=lambda x: -x[1]['db_calls'])[:10]:
+    print(f"{ds}.{t}: {info['db_calls']} calls from {len(info['used_by_services'])} services")
