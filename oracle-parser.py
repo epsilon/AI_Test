@@ -303,3 +303,79 @@ for h in range(24):
     d = hourly_db.get(h, 0)
     rate = f'{1-d/b:.0%}' if b > 0 else '-'
     print(f'  {h:2d} | {b:7d}  | {d:4d} | {rate}')
+
+# source dataframe 만들기
+import re
+import pandas as pd
+
+CLIENT_RE = re.compile(r'CLIENT=([\d.]+):(\d+)')
+PREFIX_RE = re.compile(r'^\s*\[([^\]]+)\]\s*(.*)', re.DOTALL)
+
+def session_to_row(s):
+    head = s['records'][0]
+    m = CLIENT_RE.search(head['message'])
+    ip, port = (m.group(1), m.group(2)) if m else (None, None)
+
+    # 캐시 상태 (MonitoringCache#get 한 줄만 보고 판정)
+    cache = None
+    for r in s['records']:
+        if 'MonitoringCache#get' in r['logger']:
+            msg = r['message']
+            cache = 'miss' if ('Noot' in msg or 'Not Exist' in msg) else 'hit'
+            break
+
+    # 한 세션의 모든 SQL과 datasource
+    datasources, sqls = [], []
+    for r in s['records']:
+        if 'LoggingPlugin#logStatement' in r['logger']:
+            pm = PREFIX_RE.match(r['message'])
+            if pm:
+                datasources.append(pm.group(1))
+                sqls.append(pm.group(2).strip())
+            else:
+                datasources.append(None)
+                sqls.append(r['message'].strip())
+
+    return {
+        'ip': ip,
+        'port': port,
+        'function': s['service'],
+        'start_ts': head['ts'],
+        'end_ts': s['records'][-1]['ts'],
+        'thread': s['thread'],
+        'guid': s['guid'],
+        'cache': cache,
+        'n_sqls': len(sqls),
+        'datasources': datasources,
+        'sqls': sqls,
+    }
+
+df = pd.DataFrame([session_to_row(s) for s in sessions])
+df['start_ts'] = pd.to_datetime(df['start_ts'], format='%Y-%m-%d %H:%M:%S,%f')
+df['end_ts']   = pd.to_datetime(df['end_ts'],   format='%Y-%m-%d %H:%M:%S,%f')
+df['duration_ms'] = (df['end_ts'] - df['start_ts']).dt.total_seconds() * 1000
+
+df = df.sort_values('start_ts').reset_index(drop=True)
+print(df.shape)
+df.head()
+
+# 확인하기
+print('고유 IP:', df['ip'].nunique())
+print('고유 IP:Port:', df.groupby(['ip','port']).ngroups)
+print('함수당 호출 분포:')
+print(df['function'].value_counts().head(10))
+
+# 분석 포인트
+# 1) 한 사람(ip:port)의 시간순 행동
+df[(df['ip']=='10.145.77.61') & (df['port']=='10144')] \
+    .sort_values('start_ts') \
+    [['start_ts','function','cache','duration_ms','n_sqls']]
+
+# 2) 각 사람이 마지막으로 멈춘 지점
+df.sort_values('start_ts').groupby(['ip','port']).tail(1) \
+    [['ip','port','function','start_ts','cache']]
+
+# 3) 한 사람이 한 SQL 다 펼치기
+sample = df[df['ip']=='10.145.77.61'].iloc[0]
+for ds, sql in zip(sample['datasources'], sample['sqls']):
+    print(f'[{ds}] {sql[:200]}')
