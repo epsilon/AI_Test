@@ -273,3 +273,33 @@ for svc, info in sorted(services.items(), key=lambda x: -x[1]['business_calls'])
 print('\n=== top 테이블 (db_calls 기준) ===')
 for (ds, t), info in sorted(tables.items(), key=lambda x: -x[1]['db_calls'])[:10]:
     print(f"{ds}.{t}: {info['db_calls']} calls from {len(info['used_by_services'])} services")
+
+# 확인 프로그램
+from collections import Counter
+
+# 1) preqp_mst_pmm을 쓰는 호출의 hourly 분포
+# 비즈니스 호출 (캐시 hit 포함) = getEquipmentList 서비스 전체
+preqp_sessions = [s for s in sessions 
+                  if s['service'] == 'SMARTPMS.PREQUIPMENT#getEquipmentList']
+
+hourly_business = Counter()
+for s in preqp_sessions:
+    hour = int(s['start_ts'][11:13])  # 'YYYY-MM-DD HH:MM:SS,mmm'에서 HH
+    hourly_business[hour] += 1
+
+# 2) DB 호출만 (cache miss + SQL 발생한 것)
+preqp_db_sessions = [s for s in preqp_sessions 
+                     if any('LoggingPlugin#logStatement' in r['logger'] 
+                            for r in s['records'])]
+hourly_db = Counter()
+for s in preqp_db_sessions:
+    hour = int(s['start_ts'][11:13])
+    hourly_db[hour] += 1
+
+# 3) 출력 — 24시간 분포
+print('hour | business | db | cache_hit_rate')
+for h in range(24):
+    b = hourly_business.get(h, 0)
+    d = hourly_db.get(h, 0)
+    rate = f'{1-d/b:.0%}' if b > 0 else '-'
+    print(f'  {h:2d} | {b:7d}  | {d:4d} | {rate}')
