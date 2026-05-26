@@ -330,6 +330,40 @@ const tableList = Object.entries(byTable)
   .map(([table, calls]) => ({ table, calls, count: calls.length }))
   .sort((a, b) => b.count - a.count);
 
+// infer domain per table = its most common datasource
+function inferTableDomain(table) {
+  const calls = byTable[table] || [];
+  const cnt = {};
+  for (const c of calls) {
+    if (c.datasources) {
+      const unique = new Set(c.datasources.filter(Boolean));
+      for (const ds of unique) cnt[ds] = (cnt[ds] || 0) + 1;
+    }
+  }
+  const top = Object.entries(cnt).sort((a,b) => b[1] - a[1])[0];
+  return top ? top[0] : 'unknown';
+}
+const tableDomains = {};
+for (const d of tableList) tableDomains[d.table] = inferTableDomain(d.table);
+const allDomains = [...new Set(Object.values(tableDomains))].sort();
+let domainCenters = {};
+function computeDomainCenters() {
+  domainCenters = {};
+  if (allDomains.length === 0) return;
+  if (allDomains.length === 1) {
+    domainCenters[allDomains[0]] = { x: vw/2, y: vh/2 };
+    return;
+  }
+  allDomains.forEach((d, i) => {
+    const angle = (i / allDomains.length) * Math.PI * 2 - Math.PI / 2;
+    const radius = Math.min(vw, vh) * 0.28;
+    domainCenters[d] = {
+      x: vw / 2 + Math.cos(angle) * radius,
+      y: vh / 2 + Math.sin(angle) * radius,
+    };
+  });
+}
+
 // global time (pre-computed in Python — instant)
 const GLOBAL_TMIN = Date.parse(__TMIN__);
 const GLOBAL_TMAX = Date.parse(__TMAX__);
@@ -358,6 +392,8 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
+computeDomainCenters();
+window.addEventListener('resize', computeDomainCenters);
 
 // view state
 let mainView = 'ips';            // 'ips' | 'tables'
@@ -376,12 +412,15 @@ const ipParticles = ipList.map(d => {
   };
 });
 const tableParticles = tableList.map(d => {
+  const domain = tableDomains[d.table];
+  const c = domainCenters[domain] || { x: vw/2, y: vh/2 };
   const r = Math.log(d.count + 1) * 3 + 4;
   return {
     table: d.table, calls: d.calls, count: d.count,
-    x: Math.random() * vw, y: Math.random() * vh,
-    vx: (Math.random() - 0.5) * 0.25, vy: (Math.random() - 0.5) * 0.25,
-    r, hue: hashHue(d.table), hover: false,
+    x: c.x + (Math.random() - 0.5) * 80,
+    y: c.y + (Math.random() - 0.5) * 80,
+    vx: (Math.random() - 0.5) * 0.2, vy: (Math.random() - 0.5) * 0.2,
+    r, hue: hashHue(d.table), domain, hover: false,
   };
 });
 
