@@ -289,6 +289,10 @@ const ipList = Object.entries(byIP)
   .map(([ip, calls]) => ({ ip, calls, count: calls.length }))
   .sort((a, b) => b.count - a.count);
 
+// global time range — used by all IP timelines for consistent X axis
+const GLOBAL_TMIN = Math.min(...CALLS.map(c => c._start).filter(v => v != null));
+const GLOBAL_TMAX = Math.max(...CALLS.map(c => c._end).filter(v => v != null));
+
 document.getElementById('stats').innerHTML = `
   <span class="n">${ipList.length}</span>IPs &nbsp;·&nbsp;
   <span class="n">${CALLS.length.toLocaleString()}</span>CALLS
@@ -436,10 +440,9 @@ function renderParticles() {
 let _ipCache = null;
 function buildIpCache(ip) {
   const calls = byIP[ip] || [];
-  const starts = calls.map(c => c._start).filter(v => v != null);
-  const ends = calls.map(c => c._end).filter(v => v != null);
-  const tMin = Math.min(...starts);
-  const tMax = Math.max(...ends);
+  // use global time range so X axis is comparable across IPs
+  const tMin = GLOBAL_TMIN;
+  const tMax = GLOBAL_TMAX;
 
   const byPort = {};
   for (const c of calls) {
