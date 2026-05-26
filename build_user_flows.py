@@ -1,12 +1,14 @@
 """
-build_user_flows.py  (v3)
+build_user_flows.py  (v4)
 -------------------------
-v3 changes:
-  - Removed thread-axis timeline (threads are server workers, not users)
-  - New flow: particles -> click IP -> timeline for that IP only
-  - Timeline Y axis = port (each port = one session of that user)
-  - Timeline X axis = that IP's activity time range
-  - Back button returns to particles
+v4 changes:
+  - Each session (ip,port) is analyzed for behavior pattern
+  - 3 metrics per session:
+      * call repetition (top function + count)
+      * interval CV (std/mean of inter-call intervals)
+      * mean interval
+  - Classification: AUTO (CV<0.25) / MIXED (<0.75) / HUMAN (>=0.75)
+  - Shown in timeline labels + tooltip + detail panel
 
 Usage in Jupyter:
     exec(open('build_user_flows.py').read())
@@ -25,13 +27,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <title>User Flows</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
     --bg: #0a0a0c; --bg-2: #14151a; --line: #26282f;
     --text: #f5f1e8; --text-muted: #8b8680; --text-dim: #4a4944;
     --amber: #e8a04a; --cyan: #5ec0c0; --red: #d96060;
+    --auto: #6fb3b3; --human: #d99a55; --mixed: #8b8680;
   }
   html, body { height: 100%; overflow: hidden; }
   body {
@@ -40,7 +43,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   #canvas { position: fixed; inset: 0; cursor: crosshair; }
 
-  /* HEADER (mode-dependent content) */
   .header {
     position: fixed; top: 0; left: 0; right: 0;
     z-index: 5; padding: 24px 28px;
@@ -49,7 +51,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .header > * { pointer-events: auto; }
   .header-left { display: flex; align-items: center; gap: 16px; }
-
   .back-btn {
     background: var(--bg-2); border: 1px solid var(--line);
     color: var(--text); font-family: inherit;
@@ -59,51 +60,50 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .back-btn:hover { border-color: var(--amber); color: var(--amber); }
   .back-btn.on { display: block; }
-
   .title-block h1 {
     font-family: 'Fraunces', serif; font-weight: 300;
     font-size: 22px; letter-spacing: -0.01em; margin-bottom: 4px;
   }
-  .title-block h1.ip-mode {
-    color: var(--amber);
-  }
+  .title-block h1.ip-mode { color: var(--amber); }
   .title-block .sub {
-    font-size: 11px; color: var(--text-muted);
-    letter-spacing: 0.1em;
+    font-size: 11px; color: var(--text-muted); letter-spacing: 0.1em;
   }
-
   .stats {
     font-size: 11px; color: var(--text-muted);
-    text-align: right; letter-spacing: 0.1em;
-    pointer-events: none;
+    text-align: right; letter-spacing: 0.1em; pointer-events: none;
   }
   .stats .n {
     color: var(--text); font-family: 'Fraunces', serif;
     font-size: 18px; margin-right: 6px;
   }
 
-  /* FOOTER stuff */
   .hint {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
     z-index: 5; font-size: 10px; color: var(--text-dim);
     letter-spacing: 0.3em; pointer-events: none; transition: opacity 0.3s;
   }
   .legend {
-    position: fixed; bottom: 20px; right: 28px; z-index: 5;
-    display: none; font-size: 10px; color: var(--text-muted);
-    letter-spacing: 0.1em; gap: 16px; pointer-events: none;
+    position: fixed; bottom: 18px; right: 28px; z-index: 5;
+    display: none; flex-direction: column; gap: 4px;
+    font-size: 10px; color: var(--text-muted);
+    letter-spacing: 0.1em; pointer-events: none; text-align: right;
   }
   .legend.on { display: flex; }
+  .legend .row { display: flex; gap: 14px; justify-content: flex-end; }
+  .legend .row .grp-label { color: var(--text-dim); font-size: 9px; }
   .legend .sw { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: middle; }
   .legend .sw.hit { background: rgba(232,160,74,0.75); }
   .legend .sw.miss { background: rgba(94,192,192,0.75); }
   .legend .sw.none { background: rgba(140,140,140,0.55); }
+  .legend .pat { font-weight: 700; }
+  .legend .pat.auto { color: var(--auto); }
+  .legend .pat.human { color: var(--human); }
+  .legend .pat.mixed { color: var(--mixed); }
 
   .search-box {
     position: fixed; bottom: 60px; left: 28px; z-index: 5;
     background: var(--bg-2); border: 1px solid var(--line);
-    padding: 6px 10px; width: 220px;
-    display: none;
+    padding: 6px 10px; width: 220px; display: none;
   }
   .search-box.on { display: block; }
   .search-box input {
@@ -114,17 +114,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   .tooltip {
     position: fixed; z-index: 7; background: var(--bg-2);
-    border: 1px solid var(--line); padding: 8px 12px;
+    border: 1px solid var(--line); padding: 10px 14px;
     font-size: 11px; color: var(--text); pointer-events: none;
-    display: none; white-space: nowrap; max-width: 420px;
+    display: none; white-space: nowrap; max-width: 440px;
   }
   .tooltip .ip { color: var(--amber); font-weight: 500; word-break: break-all; white-space: normal; }
   .tooltip .meta { color: var(--text-muted); margin-top: 4px; }
 
-  /* DETAIL PANEL */
   .panel {
     position: fixed; top: 0; right: 0; bottom: 0;
-    width: min(560px, 100vw);
+    width: min(580px, 100vw);
     background: var(--bg-2); border-left: 1px solid var(--line);
     z-index: 10; transform: translateX(100%);
     transition: transform 0.4s cubic-bezier(0.2,0.8,0.2,1);
@@ -142,8 +141,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .panel-head .ctx-line {
     font-size: 11px; color: var(--text-muted);
-    margin-top: 6px; letter-spacing: 0.05em;
+    margin-top: 6px; letter-spacing: 0.05em; line-height: 1.6;
   }
+  .panel-head .ctx-line .pat { font-weight: 700; }
+  .panel-head .ctx-line .pat.auto { color: var(--auto); }
+  .panel-head .ctx-line .pat.human { color: var(--human); }
+  .panel-head .ctx-line .pat.mixed { color: var(--mixed); }
   .panel-head .summary {
     display: flex; flex-wrap: wrap; gap: 18px;
     margin-top: 14px; font-size: 11px;
@@ -186,8 +189,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .badge.hit { color: var(--amber); border-color: var(--amber); }
   .badge.miss { color: var(--cyan); border-color: var(--cyan); }
-  .badge.dur { color: var(--text); }
-  .badge.sql { color: var(--text); }
+  .badge.dur, .badge.sql { color: var(--text); }
 
   .session-detail {
     grid-column: 1 / -1; margin-top: 12px;
@@ -237,9 +239,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="hint" id="hint">CLICK TO INSPECT</div>
 
 <div class="legend" id="legend">
-  <span><span class="sw hit"></span>CACHE HIT</span>
-  <span><span class="sw miss"></span>CACHE MISS</span>
-  <span><span class="sw none"></span>NO CACHE</span>
+  <div class="row">
+    <span class="grp-label">BAR COLOR</span>
+    <span><span class="sw hit"></span>CACHE HIT</span>
+    <span><span class="sw miss"></span>CACHE MISS</span>
+    <span><span class="sw none"></span>NO CACHE</span>
+  </div>
+  <div class="row">
+    <span class="grp-label">PATTERN</span>
+    <span class="pat auto">AUTO</span>
+    <span class="pat mixed">MIXED</span>
+    <span class="pat human">HUMAN</span>
+  </div>
 </div>
 
 <div class="search-box on" id="search-box">
@@ -269,7 +280,6 @@ CALLS.forEach(c => {
   c._end = c.end_ts ? Date.parse(c.end_ts) : c._start;
 });
 
-// group by IP
 const byIP = {};
 for (const c of CALLS) {
   const key = c.ip || 'unknown';
@@ -298,7 +308,6 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-// modes: 'particles' | 'ip_timeline'
 let viewMode = 'particles';
 let selectedIP = null;
 let filterQuery = '';
@@ -328,11 +337,61 @@ function fmtTime(t) {
   const p = n => String(n).padStart(2, '0');
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
-function fmtDateTime(t) {
-  const d = new Date(t);
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getMonth()+1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+function fmtInterval(ms) {
+  if (ms == null) return '-';
+  if (ms < 1000) return ms.toFixed(0) + 'ms';
+  if (ms < 60000) return (ms/1000).toFixed(1) + 's';
+  if (ms < 3600000) return (ms/60000).toFixed(1) + 'm';
+  return (ms/3600000).toFixed(1) + 'h';
 }
+
+// --- session analysis ---
+function analyzeSession(calls) {
+  const sorted = [...calls].sort((a, b) => (a._start || 0) - (b._start || 0));
+  const n = sorted.length;
+
+  // function repetition
+  const fnCnt = {};
+  for (const c of sorted) fnCnt[c.function] = (fnCnt[c.function] || 0) + 1;
+  const fnEntries = Object.entries(fnCnt).sort((a, b) => b[1] - a[1]);
+  const topFn = fnEntries[0] || [null, 0];
+  const uniqueFns = fnEntries.length;
+
+  // interval analysis
+  let pattern = 'SHORT';
+  let intervalMean = null, intervalCV = null;
+  let intervalMin = null, intervalMax = null;
+  if (n >= 3) {
+    const intervals = [];
+    for (let i = 1; i < n; i++) {
+      const dt = sorted[i]._start - sorted[i-1]._start;
+      if (dt > 0) intervals.push(dt);
+    }
+    if (intervals.length >= 2) {
+      const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      const variance = intervals.reduce((a, b) => a + (b - mean) ** 2, 0) / intervals.length;
+      const std = Math.sqrt(variance);
+      const cv = mean > 0 ? std / mean : 0;
+      intervalMean = mean;
+      intervalCV = cv;
+      intervalMin = Math.min(...intervals);
+      intervalMax = Math.max(...intervals);
+      if (cv < 0.25) pattern = 'AUTO';
+      else if (cv < 0.75) pattern = 'MIXED';
+      else pattern = 'HUMAN';
+    }
+  }
+
+  return {
+    n, uniqueFns,
+    topFn: topFn[0], topFnCount: topFn[1],
+    pattern, intervalMean, intervalCV, intervalMin, intervalMax,
+  };
+}
+
+const PATTERN_COLOR = {
+  AUTO: '#6fb3b3', HUMAN: '#d99a55', MIXED: '#8b8680', SHORT: '#4a4944',
+};
 
 // --- PARTICLES ---
 function renderParticles() {
@@ -374,7 +433,7 @@ function renderParticles() {
 }
 
 // --- IP TIMELINE ---
-let _ipCache = null;  // {ip, ports, byPort, tMin, tMax}
+let _ipCache = null;
 function buildIpCache(ip) {
   const calls = byIP[ip] || [];
   const starts = calls.map(c => c._start).filter(v => v != null);
@@ -387,20 +446,21 @@ function buildIpCache(ip) {
     const k = c.port || '?';
     (byPort[k] = byPort[k] || []).push(c);
   }
-  // sort ports by first call time
   const ports = Object.keys(byPort).sort((a, b) => {
     const aF = Math.min(...byPort[a].map(c => c._start || Infinity));
     const bF = Math.min(...byPort[b].map(c => c._start || Infinity));
     return aF - bF;
   });
-  return { ip, ports, byPort, tMin, tMax };
+  const portStats = {};
+  for (const p of ports) portStats[p] = analyzeSession(byPort[p]);
+  return { ip, ports, byPort, portStats, tMin, tMax };
 }
 
-const TL_LEFT = 140, TL_TOP = 100, TL_BOT = 50, TL_PADR = 32;
+const TL_LEFT = 260, TL_TOP = 100, TL_BOT = 60, TL_PADR = 32;
 function tlLayout(cache) {
   const w = vw - TL_LEFT - TL_PADR;
   const h = vh - TL_TOP - TL_BOT;
-  const rowH = Math.max(12, Math.min(48, h / Math.max(1, cache.ports.length)));
+  const rowH = Math.max(12, Math.min(56, h / Math.max(1, cache.ports.length)));
   return { w, h, rowH };
 }
 
@@ -424,8 +484,6 @@ function renderIpTimeline() {
     ctx.fillStyle = '#5a5852';
     ctx.fillText(fmtTime(t), x - 18, TL_TOP - 10);
   }
-
-  // top axis line
   ctx.strokeStyle = '#26282f';
   ctx.beginPath(); ctx.moveTo(TL_LEFT, TL_TOP); ctx.lineTo(TL_LEFT + w, TL_TOP); ctx.stroke();
 
@@ -439,6 +497,8 @@ function renderIpTimeline() {
     const port = cache.ports[i];
     const y = TL_TOP + i * rowH;
     const calls = cache.byPort[port];
+    const stat = cache.portStats[port];
+    const patternCol = PATTERN_COLOR[stat.pattern];
 
     // row background (alternating)
     if (i % 2 === 0) {
@@ -446,15 +506,50 @@ function renderIpTimeline() {
       ctx.fillRect(TL_LEFT, y, w, rowH);
     }
 
-    // port label
-    ctx.fillStyle = '#f5f1e8';
-    ctx.font = '11px JetBrains Mono';
-    ctx.fillText(':' + port, 14, y + rowH / 2 + 1);
-    ctx.fillStyle = '#5a5852';
-    ctx.font = '9px JetBrains Mono';
-    ctx.fillText(calls.length + ' call' + (calls.length>1?'s':''), 14, y + rowH / 2 + 14);
+    // === LEFT LABEL AREA ===
+    if (rowH >= 32) {
+      // 3-line label
+      ctx.fillStyle = '#f5f1e8';
+      ctx.font = '11px JetBrains Mono';
+      ctx.fillText(':' + port, 14, y + 13);
 
-    // bars
+      // pattern tag + interval
+      ctx.fillStyle = patternCol;
+      ctx.font = 'bold 9px JetBrains Mono';
+      let patText = stat.pattern;
+      if (stat.intervalMean != null) patText += '  every ~' + fmtInterval(stat.intervalMean);
+      ctx.fillText(patText, 14, y + 26);
+
+      // top function (or call count)
+      ctx.fillStyle = '#8b8680';
+      ctx.font = '9px JetBrains Mono';
+      const topShort = stat.topFn ? shortFn(stat.topFn) : '-';
+      ctx.fillText(`${stat.n}c · ${topShort} ×${stat.topFnCount}`, 14, y + 38);
+    } else if (rowH >= 18) {
+      // 2-line label
+      ctx.fillStyle = '#f5f1e8';
+      ctx.font = '11px JetBrains Mono';
+      ctx.fillText(':' + port, 14, y + rowH/2 - 2);
+
+      ctx.fillStyle = patternCol;
+      ctx.font = 'bold 9px JetBrains Mono';
+      ctx.fillText(`${stat.n}c · ${stat.pattern}${stat.intervalMean != null ? ' '+fmtInterval(stat.intervalMean) : ''}`, 14, y + rowH/2 + 10);
+    } else {
+      // 1-line compact label
+      ctx.fillStyle = '#f5f1e8';
+      ctx.font = '10px JetBrains Mono';
+      ctx.fillText(':' + port, 14, y + rowH/2 + 3);
+
+      ctx.fillStyle = patternCol;
+      ctx.beginPath();
+      ctx.arc(85, y + rowH/2, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#5a5852';
+      ctx.font = '9px JetBrains Mono';
+      ctx.fillText(stat.n + 'c', 95, y + rowH/2 + 3);
+    }
+
+    // === BARS ===
     for (const c of calls) {
       if (c._start == null) continue;
       const x1 = xScale(c._start);
@@ -476,12 +571,16 @@ function renderIpTimeline() {
   // tooltip
   const tt = document.getElementById('tooltip');
   if (hoverCall) {
+    const stat = cache.portStats[hoverCall.port];
     document.getElementById('tt-ip').textContent = hoverCall.function || '(unknown)';
     const meta = [
-      `:${hoverCall.port} · ${fmtTime(hoverCall._start)}`,
-      `duration ${hoverCall.duration_ms != null ? hoverCall.duration_ms.toFixed(0)+'ms' : '-'}`,
+      `:${hoverCall.port} · ${fmtTime(hoverCall._start)} · ${hoverCall.duration_ms != null ? hoverCall.duration_ms.toFixed(0)+'ms' : '-'}`,
       hoverCall.cache ? `CACHE ${hoverCall.cache.toUpperCase()}${hoverCall.cache_key ? ' · '+hoverCall.cache_key : ''}` : 'NO CACHE',
       hoverCall.n_sqls ? `${hoverCall.n_sqls} sql` : '',
+      `─────`,
+      `SESSION: ${stat.n} calls · ${stat.uniqueFns} unique fn · ${stat.pattern}`,
+      stat.intervalMean != null ? `interval ~${fmtInterval(stat.intervalMean)} (cv ${stat.intervalCV.toFixed(2)})` : '',
+      stat.topFn && stat.topFnCount > 1 ? `top: ${shortFn(stat.topFn)} ×${stat.topFnCount}` : '',
     ].filter(Boolean).join('\n');
     document.getElementById('tt-meta').textContent = meta;
     document.getElementById('tt-meta').style.whiteSpace = 'pre-line';
@@ -496,6 +595,16 @@ function renderIpTimeline() {
   canvas._hoverCall = hoverCall;
 }
 
+function shortFn(fn) {
+  if (!fn) return '-';
+  // SMARTPMS.PREQUIPMENT#getEquipmentList -> getEquipmentList
+  const hash = fn.indexOf('#');
+  if (hash >= 0) return fn.slice(hash + 1);
+  const dot = fn.lastIndexOf('.');
+  if (dot >= 0) return fn.slice(dot + 1);
+  return fn.length > 24 ? fn.slice(0, 22) + '..' : fn;
+}
+
 // --- main loop ---
 function loop() {
   ctx.clearRect(0, 0, vw, vh);
@@ -505,7 +614,6 @@ function loop() {
 }
 loop();
 
-// --- click handler ---
 canvas.addEventListener('click', e => {
   if (viewMode === 'particles') {
     for (const p of particles) {
@@ -518,7 +626,6 @@ canvas.addEventListener('click', e => {
   }
 });
 
-// --- mode switching ---
 function selectIP(ip) {
   selectedIP = ip;
   viewMode = 'ip_timeline';
@@ -531,7 +638,7 @@ function selectIP(ip) {
   document.getElementById('title').textContent = ip;
   document.getElementById('title').classList.add('ip-mode');
   document.getElementById('subtitle').textContent =
-    `${calls.length.toLocaleString()} CALLS · ${ports.size} SESSIONS (PORTS) · ${fns.size} FUNCTIONS · Y AXIS = PORT, X AXIS = TIME`;
+    `${calls.length.toLocaleString()} CALLS · ${ports.size} SESSIONS · ${fns.size} FUNCTIONS`;
   document.getElementById('stats').innerHTML = '';
   document.getElementById('legend').classList.add('on');
   document.getElementById('search-box').classList.remove('on');
@@ -556,12 +663,21 @@ function backToParticles() {
   closePanel();
 }
 
-// --- detail panel (single call) ---
 function openCallPanel(c) {
   document.getElementById('p-ip').textContent = (c.ip || '?') + ':' + (c.port || '?');
-  const ipCalls = byIP[c.ip] || [];
-  const samePort = ipCalls.filter(x => x.port === c.port);
-  document.getElementById('p-ctx').textContent = `single call · this session (port) has ${samePort.length} calls`;
+  const portCalls = (byIP[c.ip] || []).filter(x => x.port === c.port);
+  const stat = analyzeSession(portCalls);
+  const patCls = stat.pattern.toLowerCase();
+
+  let ctxHtml = `session has <strong style="color:var(--text)">${stat.n}</strong> calls, <strong style="color:var(--text)">${stat.uniqueFns}</strong> unique fn`;
+  ctxHtml += ` · pattern <span class="pat ${patCls}">${stat.pattern}</span>`;
+  if (stat.intervalMean != null) {
+    ctxHtml += `<br>interval avg <strong style="color:var(--text)">${fmtInterval(stat.intervalMean)}</strong> (cv ${stat.intervalCV.toFixed(2)}, range ${fmtInterval(stat.intervalMin)}–${fmtInterval(stat.intervalMax)})`;
+  }
+  if (stat.topFn && stat.topFnCount > 1) {
+    ctxHtml += `<br>most: <strong style="color:var(--text)">${escapeHtml(shortFn(stat.topFn))}</strong> repeated ${stat.topFnCount}× (${Math.round(stat.topFnCount/stat.n*100)}%)`;
+  }
+  document.getElementById('p-ctx').innerHTML = ctxHtml;
 
   document.getElementById('p-summary').innerHTML = `<span><strong>${escapeHtml(c.function || '-')}</strong></span>`;
 
@@ -571,7 +687,7 @@ function openCallPanel(c) {
   group.className = 'port-group';
   const lbl = document.createElement('div');
   lbl.className = 'port-label';
-  lbl.textContent = `SESSION :${c.port}`;
+  lbl.textContent = `THIS CALL · clicked from timeline`;
   group.appendChild(lbl);
   const row = makeCallRow(c);
   row.classList.add('expanded');
