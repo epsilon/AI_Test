@@ -1,0 +1,1928 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<title>WAFER MAP · 500K SCALE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Familjen+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #07090d;
+    --surface: #0c1118;
+    --surface-2: #11161f;
+    --surface-3: #161d28;
+    --border: #1f2733;
+    --border-bright: #2c3645;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --text-faint: #525a66;
+    --amber: #ffb000;
+    --amber-dim: #b87f00;
+    --cyan: #3dd9ff;
+    --green: #56d364;
+    --yellow: #e3b341;
+    --orange: #f0883e;
+    --red: #ff5454;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Familjen Grotesk', system-ui, sans-serif;
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  /* LOADING */
+  .loading {
+    position: fixed; inset: 0; z-index: 1000;
+    background: var(--bg);
+    display: grid; place-items: center;
+    transition: opacity 0.5s;
+  }
+  .loading.fadeout { opacity: 0; pointer-events: none; }
+  .loading-inner { text-align: center; }
+  .loading-spinner {
+    width: 56px; height: 56px;
+    border: 1px solid var(--amber);
+    border-top-color: transparent;
+    border-radius: 50%;
+    margin: 0 auto 22px;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-title {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--amber);
+    font-size: 11px;
+    letter-spacing: 0.2em;
+  }
+  .loading-status {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-dim);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    margin-top: 8px;
+    min-width: 220px;
+    text-transform: uppercase;
+  }
+
+  .app {
+    display: grid;
+    grid-template-rows: 52px 1fr;
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* TOPBAR */
+  .topbar {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    padding: 0 16px;
+    gap: 24px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .brand-mark {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    border: 1.5px solid var(--amber);
+    display: grid; place-items: center;
+  }
+  .brand-mark::before {
+    content: ""; width: 6px; height: 6px;
+    border-radius: 50%; background: var(--amber);
+    box-shadow: 0 0 8px var(--amber);
+  }
+  .brand-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600; font-size: 12px;
+    letter-spacing: 0.08em;
+  }
+  .brand-text span { color: var(--text-faint); }
+  .topbar-info {
+    display: flex; gap: 18px; align-items: center;
+    flex: 1; overflow: hidden;
+  }
+  .meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-faint);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .meta b { color: var(--text-dim); font-weight: 500; margin-right: 4px; }
+  .meta .val { color: var(--text); margin-left: 4px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--border-bright);
+    background: var(--surface-2);
+    padding: 4px 10px;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+  }
+  .pill .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+  .stat {
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .stat-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-faint);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .stat-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px; font-weight: 600;
+    color: var(--text);
+    line-height: 1;
+  }
+  .stat-value .unit {
+    font-size: 9px; color: var(--text-faint);
+    font-weight: 400; margin-left: 3px;
+  }
+
+  /* GRID */
+  .grid {
+    display: grid;
+    grid-template-columns: 260px 1fr 300px;
+    overflow: hidden;
+  }
+  @media (max-width: 1100px) {
+    .grid { grid-template-columns: 220px 1fr 260px; }
+  }
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr; }
+    .left-panel, .right-panel { display: none; }
+  }
+
+  .panel {
+    display: flex; flex-direction: column;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .panel.left-panel { border-right: 1px solid var(--border); }
+  .panel.right-panel { border-left: 1px solid var(--border); }
+  .panel-header {
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .panel-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  .panel-title b { color: var(--amber); font-weight: 600; }
+  .panel-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-faint);
+    letter-spacing: 0.05em;
+    margin-top: 2px;
+  }
+
+  /* FAULT LIST (VIRTUALIZED) */
+  .fault-search {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .filter-row {
+    display: flex; gap: 4px; flex-wrap: wrap;
+  }
+  .filter-chip {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    padding: 3px 7px;
+    border: 1px solid var(--border-bright);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 2px;
+    letter-spacing: 0.05em;
+    transition: all 0.15s;
+  }
+  .filter-chip:hover { color: var(--text); border-color: var(--text-faint); }
+  .filter-chip.active {
+    background: var(--amber); color: #000;
+    border-color: var(--amber);
+  }
+  .filter-chip .dot {
+    display: inline-block; width: 6px; height: 6px;
+    border-radius: 50%; margin-right: 4px;
+    vertical-align: middle;
+  }
+
+  .fault-list-wrap {
+    flex: 1; overflow-y: auto; overflow-x: hidden;
+    position: relative;
+  }
+  .fault-list-wrap::-webkit-scrollbar { width: 6px; }
+  .fault-list-wrap::-webkit-scrollbar-track { background: transparent; }
+  .fault-list-wrap::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 3px; }
+
+  .fault-list-spacer { position: relative; }
+  .fault-row {
+    position: absolute; left: 0; right: 0;
+    display: grid;
+    grid-template-columns: 10px 1fr auto;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    border-bottom: 1px solid rgba(31, 39, 51, 0.5);
+    cursor: pointer;
+    transition: background 0.1s;
+    height: 42px;
+  }
+  .fault-row:hover { background: var(--surface-2); }
+  .fault-row.selected {
+    background: rgba(255, 176, 0, 0.08);
+    border-left: 2px solid var(--amber);
+    padding-left: 10px;
+  }
+  .fault-sev {
+    width: 8px; height: 8px; border-radius: 50%;
+    box-shadow: 0 0 4px currentColor;
+  }
+  .sev-low { background: var(--green); color: var(--green); }
+  .sev-med { background: var(--yellow); color: var(--yellow); }
+  .sev-high { background: var(--orange); color: var(--orange); }
+  .sev-crit { background: var(--red); color: var(--red); }
+  .fault-info { min-width: 0; }
+  .fault-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text);
+    font-weight: 500;
+  }
+  .fault-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-faint);
+    margin-top: 1px;
+  }
+  .fault-type-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    color: var(--text-dim);
+    letter-spacing: 0.06em;
+    padding: 2px 5px;
+    border: 1px solid var(--border-bright);
+    border-radius: 2px;
+  }
+
+  /* VIEWPORT */
+  .viewport {
+    position: relative;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  #wafer-gl, #wafer-2d {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+  }
+  #wafer-gl { z-index: 1; }
+  #wafer-2d { z-index: 2; pointer-events: none; }
+  #click-layer {
+    position: absolute; inset: 0;
+    z-index: 3;
+    cursor: crosshair;
+  }
+
+  /* Corner brackets */
+  .corner {
+    position: absolute; width: 14px; height: 14px;
+    border-color: var(--text-faint);
+    pointer-events: none;
+    opacity: 0.6;
+    z-index: 4;
+  }
+  .corner.tl { top: 12px; left: 12px; border-top: 1px solid; border-left: 1px solid; }
+  .corner.tr { top: 12px; right: 12px; border-top: 1px solid; border-right: 1px solid; }
+  .corner.bl { bottom: 12px; left: 12px; border-bottom: 1px solid; border-left: 1px solid; }
+  .corner.br { bottom: 12px; right: 12px; border-bottom: 1px solid; border-right: 1px solid; }
+
+  .vp-label {
+    position: absolute;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-faint);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .vp-label.tl { top: 18px; left: 32px; }
+  .vp-label.tr { top: 18px; right: 32px; }
+  .vp-label.bl { bottom: 18px; left: 32px; }
+  .vp-label.br { bottom: 18px; right: 32px; }
+  .vp-label b { color: var(--text-dim); font-weight: 500; }
+  .vp-label .amber { color: var(--amber); }
+
+  /* Performance HUD */
+  .perf {
+    position: absolute;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-faint);
+    letter-spacing: 0.06em;
+    z-index: 5;
+    pointer-events: none;
+  }
+  .perf > div { display: flex; gap: 4px; }
+  .perf b { color: var(--text-dim); font-weight: 500; }
+  .perf .val { color: var(--text); }
+  .perf .ok { color: var(--green); }
+  .perf .warn { color: var(--yellow); }
+
+  /* Controls */
+  .vp-controls {
+    position: absolute;
+    bottom: 36px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 6px;
+    background: rgba(12, 17, 24, 0.85);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--border-bright);
+    padding: 5px;
+    border-radius: 4px;
+    z-index: 6;
+  }
+  .vp-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    padding: 5px 10px;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.15s;
+  }
+  .vp-btn:hover { color: var(--text); background: var(--surface-2); }
+  .vp-btn.active {
+    color: var(--amber);
+    border-color: var(--amber);
+    background: rgba(255, 176, 0, 0.08);
+  }
+  .vp-divider { width: 1px; background: var(--border); margin: 4px 2px; }
+
+  .mode-toggle {
+    position: absolute;
+    top: 56px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    background: rgba(12, 17, 24, 0.85);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--border-bright);
+    padding: 3px;
+    border-radius: 4px;
+    z-index: 6;
+  }
+  .mode-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    padding: 6px 12px;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.15s;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .mode-btn:hover { color: var(--text); }
+  .mode-btn.active { background: var(--amber); color: #000; }
+  .mode-btn .dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: currentColor;
+  }
+
+  .hint {
+    position: absolute;
+    bottom: 78px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-faint);
+    letter-spacing: 0.08em;
+    pointer-events: none;
+    animation: hintFade 5s ease-out forwards;
+    z-index: 5;
+  }
+  @keyframes hintFade {
+    0% { opacity: 0; }
+    20% { opacity: 1; }
+    80% { opacity: 1; }
+    100% { opacity: 0.3; }
+  }
+
+  .toast {
+    position: absolute;
+    top: 100px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(12, 17, 24, 0.95);
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    padding: 8px 14px;
+    border-radius: 3px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+    white-space: nowrap;
+    z-index: 7;
+  }
+  .toast.show { opacity: 1; }
+
+  /* DETAILS */
+  .detail-empty {
+    flex: 1;
+    display: grid;
+    place-items: center;
+    color: var(--text-faint);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-align: center;
+    padding: 20px;
+    line-height: 1.8;
+  }
+  .detail-card {
+    flex: 1;
+    overflow-y: auto;
+  }
+  .detail-card::-webkit-scrollbar { width: 6px; }
+  .detail-card::-webkit-scrollbar-thumb { background: var(--border-bright); }
+
+  .detail-section {
+    padding: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-section-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-faint);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .detail-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--amber);
+    letter-spacing: 0.02em;
+    margin-bottom: 4px;
+  }
+  .detail-id-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.06em;
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 14px;
+  }
+  .detail-field { display: flex; flex-direction: column; gap: 2px; }
+  .detail-key {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: var(--text-faint);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .detail-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--text);
+    font-weight: 500;
+  }
+  .detail-val .u {
+    font-size: 9px;
+    color: var(--text-faint);
+    margin-left: 2px;
+  }
+  .detail-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .detail-btn {
+    background: var(--surface-2);
+    border: 1px solid var(--border-bright);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    padding: 6px 10px;
+    cursor: pointer;
+    border-radius: 2px;
+    flex: 1;
+    transition: all 0.15s;
+  }
+  .detail-btn:hover {
+    border-color: var(--amber);
+    color: var(--amber);
+  }
+  .detail-btn.primary {
+    background: var(--amber);
+    color: #000;
+    border-color: var(--amber);
+  }
+  .nav-row { display: flex; gap: 6px; }
+  .nav-btn {
+    flex: 1;
+    background: var(--surface-2);
+    border: 1px solid var(--border-bright);
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    padding: 8px;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.15s;
+  }
+  .nav-btn:hover {
+    color: var(--text);
+    border-color: var(--text-faint);
+  }
+  .mode-info {
+    padding: 12px 14px;
+    background: rgba(255, 176, 0, 0.05);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text-dim);
+  }
+  .mode-info b { color: var(--amber); font-weight: 600; }
+  .sev-bar { display: flex; align-items: center; gap: 8px; }
+  .sev-bar-track {
+    flex: 1;
+    height: 4px;
+    background: var(--surface-2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .sev-bar-fill {
+    height: 100%;
+    background: var(--amber);
+    border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+
+<!-- LOADING -->
+<div id="loading" class="loading">
+  <div class="loading-inner">
+    <div class="loading-spinner"></div>
+    <div class="loading-title">INITIALIZING WAFER MAP</div>
+    <div id="loading-status" class="loading-status">ALLOCATING BUFFERS…</div>
+  </div>
+</div>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div class="brand-text">WAFER MAP <span>·</span> 500K SCALE</div>
+    </div>
+    <div class="topbar-info">
+      <div class="pill"><span class="dot"></span><span class="mono">SCAN ACTIVE</span></div>
+      <div class="meta"><b>LOT</b><span class="val">W2-2847-K3</span></div>
+      <div class="meta"><b>WAFER</b><span class="val">14 / 25</span></div>
+      <div class="meta"><b>RECIPE</b><span class="val">STD-100</span></div>
+      <div class="meta"><b>Ø</b><span class="val">300 MM</span></div>
+    </div>
+    <div style="display:flex; gap: 20px;">
+      <div class="stat">
+        <div class="stat-label">Inspection Points</div>
+        <div class="stat-value mono">10.0<span class="unit">T</span></div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Detected Faults</div>
+        <div class="stat-value mono" id="stat-faults" style="color: var(--amber)">0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Density (ppm)</div>
+        <div class="stat-value mono">0.05</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="grid">
+    <aside class="panel left-panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title"><b>FAULT</b> REGISTRY</div>
+          <div class="panel-sub mono" id="list-count">— faults</div>
+        </div>
+      </div>
+      <div class="fault-search">
+        <div class="filter-row">
+          <button class="filter-chip active" data-filter="all">ALL</button>
+          <button class="filter-chip" data-filter="3"><span class="dot sev-crit"></span>CRIT</button>
+          <button class="filter-chip" data-filter="2"><span class="dot sev-high"></span>HIGH</button>
+          <button class="filter-chip" data-filter="1"><span class="dot sev-med"></span>MED</button>
+          <button class="filter-chip" data-filter="0"><span class="dot sev-low"></span>LOW</button>
+        </div>
+      </div>
+      <div class="fault-list-wrap" id="fault-list-wrap">
+        <div class="fault-list-spacer" id="fault-list-spacer"></div>
+      </div>
+    </aside>
+
+    <section class="viewport" id="viewport">
+      <canvas id="wafer-gl"></canvas>
+      <canvas id="wafer-2d"></canvas>
+      <div id="click-layer"></div>
+
+      <span class="corner tl"></span>
+      <span class="corner tr"></span>
+      <span class="corner bl"></span>
+      <span class="corner br"></span>
+
+      <div class="vp-label tl"><b>VIEW</b> <span class="amber" id="view-mode-label">DENSITY</span></div>
+      <div class="vp-label tr"><b>ZOOM</b> <span id="view-zoom-label">1.0×</span></div>
+      <div class="vp-label bl"><b>CURSOR</b> <span id="view-coord-label">— , —</span></div>
+      <div class="vp-label br"><b>2026-05-21</b> <span id="view-clock">14:32:18</span></div>
+
+      <div class="perf">
+        <div><b>POINTS</b><span class="val" id="perf-points">0</span></div>
+        <div><b>FPS</b><span class="val ok" id="perf-fps">60</span></div>
+        <div><b>RENDER</b><span class="val" id="perf-render">— ms</span></div>
+        <div><b>GPU MEM</b><span class="val" id="perf-mem">— MB</span></div>
+      </div>
+
+      <div class="mode-toggle">
+        <button class="mode-btn active" data-nav="smart"><span class="dot"></span>SMART NAV</button>
+        <button class="mode-btn" data-nav="trad">TRADITIONAL</button>
+      </div>
+
+      <div class="hint mono">CLICK ANYWHERE ON WAFER →  JUMP TO NEAREST FAULT</div>
+
+      <div class="vp-controls">
+        <button class="vp-btn" data-zoom="fit">FIT</button>
+        <div class="vp-divider"></div>
+        <button class="vp-btn" data-zoom="0.5">10×</button>
+        <button class="vp-btn" data-zoom="2">100×</button>
+        <button class="vp-btn" data-zoom="6">1K×</button>
+        <button class="vp-btn" data-zoom="15">10K×</button>
+        <div class="vp-divider"></div>
+        <button class="vp-btn active" data-mode="density">DENSITY</button>
+        <button class="vp-btn" data-mode="dots">DOTS</button>
+      </div>
+
+      <div class="toast" id="toast"></div>
+    </section>
+
+    <aside class="panel right-panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title"><b>FAULT</b> DETAIL</div>
+          <div class="panel-sub mono" id="detail-status">no selection</div>
+        </div>
+      </div>
+      <div class="mode-info" id="mode-info">
+        <b>SMART NAV</b> — 어디든 클릭하면 가장 가까운 fault로 즉시 점프합니다. 클러스터 밀도에 따라 배율이 자동으로 맞춰집니다.
+      </div>
+      <div id="detail-content" class="detail-card" style="display:none;"></div>
+      <div id="detail-empty" class="detail-empty">
+        WAITING<br/>FOR<br/>SELECTION
+      </div>
+    </aside>
+  </main>
+</div>
+
+<script>
+"use strict";
+// ============================================================
+// CONSTANTS
+// ============================================================
+const WAFER_R = 150;           // mm
+const N_FAULTS = 500247;       // actual count we'll generate
+const GRID_CELL = 5;           // mm spatial index cell size
+const GRID_DIM = Math.ceil(2 * WAFER_R / GRID_CELL) + 2;  // 62
+const GRID_OFFSET = (GRID_DIM * GRID_CELL) / 2;
+
+const FAULT_TYPES = ['PARTICLE', 'SCRATCH', 'VOID', 'RESIDUE', 'PATTERN', 'BRIDGE'];
+const SEV_LABELS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+const SEV_COLOR_CSS = ['var(--green)', 'var(--yellow)', 'var(--orange)', 'var(--red)'];
+
+// ============================================================
+// LOADING ORCHESTRATOR (async chunks so UI stays responsive)
+// ============================================================
+function setLoadingStatus(msg) {
+  document.getElementById('loading-status').textContent = msg;
+}
+function nextFrame() {
+  return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+}
+
+// ============================================================
+// FAULT GENERATION (realistic wafer defect patterns)
+// ============================================================
+const faults = {
+  x: null, y: null, sev: null, type: null, size: null,
+  count: 0,
+};
+
+function gaussian() {
+  // Box-Muller, single output
+  const u1 = Math.random() || 1e-9;
+  const u2 = Math.random();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+function pickSev(p0, p1, p2, p3) {
+  const r = Math.random();
+  if (r < p0) return 0;
+  if (r < p0 + p1) return 1;
+  if (r < p0 + p1 + p2) return 2;
+  return 3;
+}
+
+async function generateFaults() {
+  const N = N_FAULTS;
+  setLoadingStatus(`ALLOCATING ${(N / 1000).toFixed(0)}K BUFFERS…`);
+  await nextFrame();
+
+  faults.x = new Float32Array(N);
+  faults.y = new Float32Array(N);
+  faults.sev = new Uint8Array(N);
+  faults.type = new Uint8Array(N);
+  faults.size = new Uint16Array(N);  // 0.01μm units
+
+  let idx = 0;
+  const R2 = (WAFER_R - 3) * (WAFER_R - 3);
+
+  function place(px, py, sv) {
+    if (idx >= N) return false;
+    if (px*px + py*py > R2) return false;
+    faults.x[idx] = px;
+    faults.y[idx] = py;
+    faults.sev[idx] = sv;
+    faults.type[idx] = (Math.random() * 6) | 0;
+    faults.size[idx] = ((Math.random() * 250) + 8) | 0;
+    idx++;
+    return true;
+  }
+
+  // 1) Center hot spot (process chamber issue)
+  setLoadingStatus('GENERATING CENTER HOTSPOT…');
+  await nextFrame();
+  let attempts = 0;
+  const centerTarget = 32000;
+  const startC = idx;
+  while (idx - startC < centerTarget && attempts < centerTarget * 3) {
+    attempts++;
+    const r = Math.abs(gaussian()) * 14;
+    const a = Math.random() * Math.PI * 2;
+    place(Math.cos(a) * r, Math.sin(a) * r,
+      pickSev(0.30, 0.35, 0.25, 0.10));
+  }
+
+  // 2) Edge ring (handling/etch effects)
+  setLoadingStatus('GENERATING EDGE RING…');
+  await nextFrame();
+  attempts = 0;
+  const edgeTarget = 75000;
+  const startE = idx;
+  while (idx - startE < edgeTarget && attempts < edgeTarget * 3) {
+    attempts++;
+    const a = Math.random() * Math.PI * 2;
+    const r = (WAFER_R - 5) - Math.abs(gaussian()) * 4.5;
+    place(Math.cos(a) * r, Math.sin(a) * r,
+      pickSev(0.45, 0.30, 0.18, 0.07));
+  }
+
+  // 3) Radial scratches (handling damage)
+  setLoadingStatus('GENERATING RADIAL SCRATCHES…');
+  await nextFrame();
+  const scratches = [
+    { angle: 0.4,  rs: 30, re: 110, w: 0.8, n: 9000, sev: [0.05, 0.25, 0.45, 0.25] },
+    { angle: 1.9,  rs: 50, re: 140, w: 1.2, n: 11000, sev: [0.10, 0.30, 0.40, 0.20] },
+    { angle: 3.6,  rs: 25, re: 90,  w: 0.6, n: 6500, sev: [0.15, 0.35, 0.35, 0.15] },
+    { angle: 5.1,  rs: 60, re: 135, w: 1.5, n: 8500, sev: [0.10, 0.25, 0.45, 0.20] },
+    { angle: 4.4,  rs: 35, re: 100, w: 0.5, n: 5000, sev: [0.20, 0.40, 0.30, 0.10] },
+  ];
+  for (const s of scratches) {
+    const cs = Math.cos(s.angle), sn = Math.sin(s.angle);
+    const px = -sn, py = cs; // perpendicular
+    for (let i = 0; i < s.n; i++) {
+      const r = s.rs + (s.re - s.rs) * Math.random();
+      const perp = gaussian() * s.w;
+      place(cs * r + px * perp, sn * r + py * perp,
+        pickSev(s.sev[0], s.sev[1], s.sev[2], s.sev[3]));
+    }
+  }
+
+  // 4) Cluster defects (process variations)
+  setLoadingStatus('GENERATING CLUSTER DEFECTS…');
+  await nextFrame();
+  const numClusters = 22;
+  for (let c = 0; c < numClusters; c++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = 20 + Math.random() * (WAFER_R - 40);
+    const cx = Math.cos(a) * r;
+    const cy = Math.sin(a) * r;
+    const spread = 2 + Math.random() * 11;
+    const cnt = 800 + ((Math.random() * 14000) | 0);
+    const dominant = (Math.random() * 4) | 0;
+    const sevWeights = [0.05, 0.05, 0.05, 0.05];
+    sevWeights[dominant] = 0.85;
+    for (let i = 0; i < cnt; i++) {
+      place(cx + gaussian() * spread, cy + gaussian() * spread,
+        pickSev(sevWeights[0], sevWeights[1], sevWeights[2], sevWeights[3]));
+    }
+  }
+
+  // 5) Background scatter
+  setLoadingStatus('FILLING BACKGROUND…');
+  await nextFrame();
+  attempts = 0;
+  while (idx < N && attempts < N * 2) {
+    attempts++;
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * (WAFER_R - 4);
+    place(Math.cos(a) * r, Math.sin(a) * r,
+      pickSev(0.65, 0.22, 0.10, 0.03));
+  }
+
+  faults.count = idx;
+  // Update the displayed count to reflect actual
+  document.getElementById('stat-faults').textContent = idx.toLocaleString();
+}
+
+// ============================================================
+// SPATIAL INDEX (uniform grid)
+// ============================================================
+let gridStart = null;  // Int32Array; index where each cell's items start in gridItems
+let gridItems = null;  // Int32Array of fault indices, grouped by cell
+
+async function buildSpatialIndex() {
+  setLoadingStatus('BUILDING SPATIAL INDEX…');
+  await nextFrame();
+
+  const N = faults.count;
+  const cells = GRID_DIM * GRID_DIM;
+  const counts = new Int32Array(cells);
+
+  // Pass 1: count per cell
+  for (let i = 0; i < N; i++) {
+    const gx = ((faults.x[i] + GRID_OFFSET) / GRID_CELL) | 0;
+    const gy = ((faults.y[i] + GRID_OFFSET) / GRID_CELL) | 0;
+    if (gx >= 0 && gx < GRID_DIM && gy >= 0 && gy < GRID_DIM) {
+      counts[gy * GRID_DIM + gx]++;
+    }
+  }
+
+  // Cumulative starts
+  gridStart = new Int32Array(cells + 1);
+  let acc = 0;
+  for (let c = 0; c < cells; c++) {
+    gridStart[c] = acc;
+    acc += counts[c];
+  }
+  gridStart[cells] = acc;
+
+  // Pass 2: fill
+  gridItems = new Int32Array(N);
+  const cursor = new Int32Array(cells);
+  for (let i = 0; i < N; i++) {
+    const gx = ((faults.x[i] + GRID_OFFSET) / GRID_CELL) | 0;
+    const gy = ((faults.y[i] + GRID_OFFSET) / GRID_CELL) | 0;
+    if (gx >= 0 && gx < GRID_DIM && gy >= 0 && gy < GRID_DIM) {
+      const c = gy * GRID_DIM + gx;
+      gridItems[gridStart[c] + cursor[c]++] = i;
+    }
+  }
+}
+
+function findNearest(wx, wy, filterSev) {
+  const gx0 = ((wx + GRID_OFFSET) / GRID_CELL) | 0;
+  const gy0 = ((wy + GRID_OFFSET) / GRID_CELL) | 0;
+
+  let best = -1;
+  let bestD = Infinity;
+
+  // Spiral outward by ring; stop when we know we can't find closer
+  for (let radius = 0; radius < GRID_DIM; radius++) {
+    const xMin = Math.max(0, gx0 - radius);
+    const xMax = Math.min(GRID_DIM - 1, gx0 + radius);
+    const yMin = Math.max(0, gy0 - radius);
+    const yMax = Math.min(GRID_DIM - 1, gy0 + radius);
+
+    for (let cy = yMin; cy <= yMax; cy++) {
+      for (let cx = xMin; cx <= xMax; cx++) {
+        // Only border cells at this radius
+        if (radius > 0 && cx > xMin && cx < xMax && cy > yMin && cy < yMax) continue;
+        const c = cy * GRID_DIM + cx;
+        const s = gridStart[c];
+        const e = gridStart[c + 1];
+        for (let k = s; k < e; k++) {
+          const i = gridItems[k];
+          if (filterSev != null && faults.sev[i] !== filterSev) continue;
+          const dx = faults.x[i] - wx;
+          const dy = faults.y[i] - wy;
+          const d = dx * dx + dy * dy;
+          if (d < bestD) { bestD = d; best = i; }
+        }
+      }
+    }
+
+    if (best !== -1) {
+      // Can we stop? Closest possible distance from query point to outside ring (radius+1) > bestD?
+      const minOutside = (radius) * GRID_CELL;
+      if (minOutside * minOutside > bestD) break;
+    }
+  }
+
+  return best;
+}
+
+// ============================================================
+// SORTED INDEX (for fault list, severity-ordered)
+// ============================================================
+let sortedOrder = null;   // Int32Array length N (crit first, then high, med, low)
+let sevStarts = null;     // Int32Array length 5 (start offsets per severity, plus end)
+
+async function buildSortedIndex() {
+  setLoadingStatus('SORTING REGISTRY…');
+  await nextFrame();
+
+  const N = faults.count;
+  const sevCounts = [0, 0, 0, 0];
+  for (let i = 0; i < N; i++) sevCounts[faults.sev[i]]++;
+
+  // Order: crit(3), high(2), med(1), low(0)
+  const starts = [0, sevCounts[3], sevCounts[3] + sevCounts[2],
+    sevCounts[3] + sevCounts[2] + sevCounts[1], N];
+  sevStarts = new Int32Array(starts);
+
+  sortedOrder = new Int32Array(N);
+  const cursors = new Int32Array(4);
+  cursors[0] = sevStarts[0]; // crit
+  cursors[1] = sevStarts[1]; // high
+  cursors[2] = sevStarts[2]; // med
+  cursors[3] = sevStarts[3]; // low
+
+  for (let i = 0; i < N; i++) {
+    const s = faults.sev[i];
+    const rank = 3 - s;  // 3->0, 2->1, 1->2, 0->3
+    sortedOrder[cursors[rank]++] = i;
+  }
+}
+
+function getFilteredIndices(filter) {
+  if (filter === 'all') {
+    return { offset: 0, length: faults.count };
+  }
+  // filter is '0'..'3' for sev
+  const sev = parseInt(filter);
+  const rank = 3 - sev;
+  return { offset: sevStarts[rank], length: sevStarts[rank + 1] - sevStarts[rank] };
+}
+
+// ============================================================
+// WEBGL RENDERER
+// ============================================================
+const glCanvas = document.getElementById('wafer-gl');
+let gl = null;
+let program = null;
+let posBuffer = null;
+let sevBuffer = null;
+let attrLocs = {};
+let uniLocs = {};
+
+const VS_SRC = `#version 300 es
+in vec2 a_pos;
+in float a_sev;
+uniform vec2 u_camera;
+uniform float u_zoom;
+uniform vec2 u_viewport;
+uniform float u_pointSize;
+out float v_sev;
+
+void main() {
+  vec2 screen = (a_pos - u_camera) * u_zoom;
+  vec2 clip = screen / (u_viewport * 0.5);
+  clip.y = -clip.y;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  gl_PointSize = u_pointSize;
+  v_sev = a_sev;
+}
+`;
+
+const FS_SRC = `#version 300 es
+precision mediump float;
+in float v_sev;
+uniform float u_mode; // 0 = density (additive), 1 = dots
+uniform float u_alpha;
+out vec4 fragColor;
+
+void main() {
+  vec2 c = gl_PointCoord - 0.5;
+  float d = dot(c, c);
+  if (d > 0.25) discard;
+
+  vec3 colors[4];
+  colors[0] = vec3(0.34, 0.83, 0.39);
+  colors[1] = vec3(0.89, 0.70, 0.25);
+  colors[2] = vec3(0.94, 0.53, 0.24);
+  colors[3] = vec3(1.0, 0.33, 0.33);
+  int si = int(v_sev + 0.5);
+  vec3 color = colors[si];
+
+  if (u_mode < 0.5) {
+    // density: unified amber, additive
+    color = vec3(1.0, 0.62, 0.18);
+    fragColor = vec4(color, u_alpha);
+  } else {
+    float edge = 1.0 - smoothstep(0.18, 0.25, d);
+    fragColor = vec4(color, edge);
+  }
+}
+`;
+
+function compileShader(gl, src, type) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(sh));
+    throw new Error('shader fail');
+  }
+  return sh;
+}
+
+async function initGL() {
+  setLoadingStatus('INITIALIZING WEBGL2…');
+  await nextFrame();
+
+  gl = glCanvas.getContext('webgl2', {
+    antialias: true,
+    alpha: false,
+    premultipliedAlpha: false,
+    preserveDrawingBuffer: false,
+  });
+  if (!gl) {
+    setLoadingStatus('WEBGL2 NOT SUPPORTED');
+    throw new Error('No WebGL2');
+  }
+
+  const vs = compileShader(gl, VS_SRC, gl.VERTEX_SHADER);
+  const fs = compileShader(gl, FS_SRC, gl.FRAGMENT_SHADER);
+  program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(program));
+    throw new Error('link fail');
+  }
+
+  attrLocs.a_pos = gl.getAttribLocation(program, 'a_pos');
+  attrLocs.a_sev = gl.getAttribLocation(program, 'a_sev');
+  uniLocs.u_camera = gl.getUniformLocation(program, 'u_camera');
+  uniLocs.u_zoom = gl.getUniformLocation(program, 'u_zoom');
+  uniLocs.u_viewport = gl.getUniformLocation(program, 'u_viewport');
+  uniLocs.u_pointSize = gl.getUniformLocation(program, 'u_pointSize');
+  uniLocs.u_mode = gl.getUniformLocation(program, 'u_mode');
+  uniLocs.u_alpha = gl.getUniformLocation(program, 'u_alpha');
+
+  // Interleave x,y into Float32Array(2*N)
+  setLoadingStatus('UPLOADING TO GPU…');
+  await nextFrame();
+  const N = faults.count;
+  const pos = new Float32Array(N * 2);
+  for (let i = 0; i < N; i++) {
+    pos[i * 2] = faults.x[i];
+    pos[i * 2 + 1] = faults.y[i];
+  }
+  posBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+
+  sevBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, sevBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, faults.sev, gl.STATIC_DRAW);
+
+  // Estimate GPU memory
+  const memMB = ((N * 2 * 4 + N * 1) / (1024 * 1024)).toFixed(1);
+  document.getElementById('perf-mem').textContent = memMB + ' MB';
+  document.getElementById('perf-points').textContent = N.toLocaleString();
+}
+
+// ============================================================
+// VIEW STATE
+// ============================================================
+const view = {
+  cameraX: 0,
+  cameraY: 0,
+  zoom: 2,
+  fitZoom: 2,
+  dpr: 1,
+  mode: 'density',
+  navMode: 'smart',
+  selectedIdx: -1,
+  filter: 'all',
+  filterSev: null,
+  hoverPath: null,
+  cursor: null,
+};
+
+const canvas2d = document.getElementById('wafer-2d');
+const ctx2d = canvas2d.getContext('2d');
+const clickLayer = document.getElementById('click-layer');
+
+function resize() {
+  const rect = glCanvas.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  view.dpr = dpr;
+  glCanvas.width = rect.width * dpr;
+  glCanvas.height = rect.height * dpr;
+  canvas2d.width = rect.width * dpr;
+  canvas2d.height = rect.height * dpr;
+  canvas2d.style.width = rect.width + 'px';
+  canvas2d.style.height = rect.height + 'px';
+  view.fitZoom = Math.min(rect.width, rect.height) / (WAFER_R * 2.15);
+  if (view.zoom < view.fitZoom * 0.5) view.zoom = view.fitZoom;
+  scheduleRender();
+}
+
+function getCssSize() {
+  return { w: glCanvas.width / view.dpr, h: glCanvas.height / view.dpr };
+}
+
+function w2s(wx, wy) {
+  const { w, h } = getCssSize();
+  return {
+    x: (wx - view.cameraX) * view.zoom + w / 2,
+    y: (wy - view.cameraY) * view.zoom + h / 2,
+  };
+}
+function s2w(sx, sy) {
+  const { w, h } = getCssSize();
+  return {
+    x: (sx - w / 2) / view.zoom + view.cameraX,
+    y: (sy - h / 2) / view.zoom + view.cameraY,
+  };
+}
+
+// ============================================================
+// RENDER
+// ============================================================
+let renderScheduled = false;
+let lastRenderTime = 0;
+let frameTimes = [];
+
+function scheduleRender() {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(render);
+}
+
+function render() {
+  renderScheduled = false;
+  const t0 = performance.now();
+  renderGL();
+  renderOverlay();
+  const dt = performance.now() - t0;
+  document.getElementById('perf-render').textContent = dt.toFixed(1) + ' ms';
+
+  // FPS
+  frameTimes.push(t0);
+  while (frameTimes.length > 0 && t0 - frameTimes[0] > 1000) frameTimes.shift();
+  const fps = frameTimes.length;
+  const fpsEl = document.getElementById('perf-fps');
+  fpsEl.textContent = fps;
+  fpsEl.className = 'val ' + (fps >= 50 ? 'ok' : fps >= 30 ? 'warn' : '');
+}
+
+function renderGL() {
+  if (!gl) return;
+  const w = glCanvas.width, h = glCanvas.height;
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0.027, 0.035, 0.051, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  const isDensity = view.mode === 'density' || view.zoom < view.fitZoom * 2.5;
+  gl.enable(gl.BLEND);
+  if (isDensity) {
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  } else {
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  }
+
+  gl.useProgram(program);
+  gl.uniform2f(uniLocs.u_camera, view.cameraX, view.cameraY);
+  gl.uniform1f(uniLocs.u_zoom, view.zoom * view.dpr);
+  gl.uniform2f(uniLocs.u_viewport, w, h);
+
+  // Point size: small at low zoom (sharp density), bigger at high zoom
+  const zoomRatio = view.zoom / view.fitZoom;
+  let ptSize;
+  if (isDensity) {
+    ptSize = Math.max(2.0, Math.min(4.5, 1.5 + zoomRatio * 0.4)) * view.dpr;
+  } else {
+    ptSize = Math.max(3.0, Math.min(14, 2.5 + zoomRatio * 0.7)) * view.dpr;
+  }
+  gl.uniform1f(uniLocs.u_pointSize, ptSize);
+  gl.uniform1f(uniLocs.u_mode, isDensity ? 0.0 : 1.0);
+  // Alpha for density: tuned so dense clusters saturate, sparse areas barely visible
+  // (calibrated for 500K points at fit zoom)
+  let alpha;
+  if (isDensity) {
+    alpha = 0.045 + Math.max(0, 1.5 - zoomRatio) * 0.02;
+  } else {
+    alpha = 1.0;
+  }
+  gl.uniform1f(uniLocs.u_alpha, alpha);
+
+  // Attrs
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.enableVertexAttribArray(attrLocs.a_pos);
+  gl.vertexAttribPointer(attrLocs.a_pos, 2, gl.FLOAT, false, 0, 0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, sevBuffer);
+  gl.enableVertexAttribArray(attrLocs.a_sev);
+  gl.vertexAttribPointer(attrLocs.a_sev, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+
+  gl.drawArrays(gl.POINTS, 0, faults.count);
+}
+
+function renderOverlay() {
+  const ctx = ctx2d;
+  const dpr = view.dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const { w, h } = getCssSize();
+  ctx.clearRect(0, 0, w, h);
+
+  const c = w2s(0, 0);
+  const r = WAFER_R * view.zoom;
+
+  // Wafer outline
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, r + 4, 0, Math.PI * 2);
+  ctx.strokeStyle = '#162030';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = '#3a4458';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Notch
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  const nw = Math.max(3, Math.min(12, 0.05 * r));
+  ctx.beginPath();
+  ctx.moveTo(-nw, r);
+  ctx.lineTo(0, r - nw * 0.7);
+  ctx.lineTo(nw, r);
+  ctx.fillStyle = '#07090d';
+  ctx.fill();
+  ctx.strokeStyle = '#3a4458';
+  ctx.stroke();
+  ctx.restore();
+
+  // Die grid (high zoom)
+  if (view.zoom > view.fitZoom * 3) {
+    const op = Math.min(1, (view.zoom / view.fitZoom - 3) / 5);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.strokeStyle = `rgba(50, 65, 95, ${op * 0.5})`;
+    ctx.lineWidth = 0.5;
+    const D = 8;
+    const vw = w / view.zoom, vh = h / view.zoom;
+    const sx0 = Math.floor((view.cameraX - vw / 2) / D) * D;
+    const sy0 = Math.floor((view.cameraY - vh / 2) / D) * D;
+    for (let x = sx0; x <= view.cameraX + vw / 2; x += D) {
+      const px = w2s(x, 0).x;
+      ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, h); ctx.stroke();
+    }
+    for (let y = sy0; y <= view.cameraY + vh / 2; y += D) {
+      const py = w2s(0, y).y;
+      ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(w, py); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Hover path
+  if (view.hoverPath) {
+    const t = Math.min(1, (performance.now() - view.hoverPath.start) / 400);
+    const ix = view.hoverPath.from.x + (view.hoverPath.to.x - view.hoverPath.from.x) * t;
+    const iy = view.hoverPath.from.y + (view.hoverPath.to.y - view.hoverPath.from.y) * t;
+    ctx.save();
+    ctx.strokeStyle = `rgba(255, 176, 0, ${0.7 * (1 - t)})`;
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(view.hoverPath.from.x, view.hoverPath.from.y);
+    ctx.lineTo(ix, iy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = `rgba(255, 176, 0, ${0.8 * (1 - t)})`;
+    ctx.beginPath();
+    ctx.arc(view.hoverPath.from.x, view.hoverPath.from.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    if (t < 1) scheduleRender();
+  }
+
+  // Selected reticle
+  if (view.selectedIdx >= 0) {
+    const sx = faults.x[view.selectedIdx];
+    const sy = faults.y[view.selectedIdx];
+    const p = w2s(sx, sy);
+
+    const t = (performance.now() % 1800) / 1800;
+    const pulse = 1 + Math.sin(t * Math.PI * 2) * 0.08;
+    const R = 17 * pulse;
+
+    ctx.strokeStyle = '#ffb000';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffb000';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    const gap = 4, len = 8;
+    ctx.beginPath();
+    ctx.moveTo(p.x - R - gap - len, p.y); ctx.lineTo(p.x - R - gap, p.y);
+    ctx.moveTo(p.x + R + gap, p.y);       ctx.lineTo(p.x + R + gap + len, p.y);
+    ctx.moveTo(p.x, p.y - R - gap - len); ctx.lineTo(p.x, p.y - R - gap);
+    ctx.moveTo(p.x, p.y + R + gap);       ctx.lineTo(p.x, p.y + R + gap + len);
+    ctx.stroke();
+
+    // ID label
+    ctx.font = '500 10px JetBrains Mono';
+    const label = `#${(view.selectedIdx + 1).toString().padStart(6, '0')}`;
+    const lw = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(255, 176, 0, 0.95)';
+    ctx.fillRect(p.x + R + 14, p.y - 9, lw + 10, 18);
+    ctx.fillStyle = '#07090d';
+    ctx.fillText(label, p.x + R + 19, p.y + 4);
+
+    // Continuous pulse animation
+    scheduleRender();
+  }
+
+  // Cursor crosshair
+  if (view.cursor && view.zoom > view.fitZoom * 0.7) {
+    const cu = view.cursor;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 176, 0, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cu.x - 14, cu.y); ctx.lineTo(cu.x - 5, cu.y);
+    ctx.moveTo(cu.x + 5, cu.y); ctx.lineTo(cu.x + 14, cu.y);
+    ctx.moveTo(cu.x, cu.y - 14); ctx.lineTo(cu.x, cu.y - 5);
+    ctx.moveTo(cu.x, cu.y + 5); ctx.lineTo(cu.x, cu.y + 14);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  document.getElementById('view-zoom-label').textContent = (view.zoom / view.fitZoom).toFixed(1) + '×';
+}
+
+// ============================================================
+// CAMERA ANIMATION
+// ============================================================
+let animTok = 0;
+function animateTo(tx, ty, tz, dur = 700) {
+  animTok++;
+  const myTok = animTok;
+  const sx = view.cameraX, sy = view.cameraY, sz = view.zoom;
+  const start = performance.now();
+  const lsz = Math.log(sz), ltz = Math.log(tz);
+
+  function tick() {
+    if (myTok !== animTok) return;
+    const now = performance.now();
+    const t = Math.min(1, (now - start) / dur);
+    const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    view.cameraX = sx + (tx - sx) * e;
+    view.cameraY = sy + (ty - sy) * e;
+    view.zoom = Math.exp(lsz + (ltz - lsz) * e);
+    scheduleRender();
+    if (t < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+function computeAutoZoom(idx) {
+  const fx = faults.x[idx], fy = faults.y[idx];
+  // Count nearby faults within 8mm using spatial index
+  const R = 8;
+  const gx0 = ((fx + GRID_OFFSET) / GRID_CELL) | 0;
+  const gy0 = ((fy + GRID_OFFSET) / GRID_CELL) | 0;
+  const cells = Math.ceil(R / GRID_CELL);
+  let nearby = 0;
+  for (let cy = Math.max(0, gy0 - cells); cy <= Math.min(GRID_DIM - 1, gy0 + cells); cy++) {
+    for (let cx = Math.max(0, gx0 - cells); cx <= Math.min(GRID_DIM - 1, gx0 + cells); cx++) {
+      const c = cy * GRID_DIM + cx;
+      const s = gridStart[c];
+      const e = gridStart[c + 1];
+      for (let k = s; k < e; k++) {
+        const i = gridItems[k];
+        if (view.filterSev != null && faults.sev[i] !== view.filterSev) continue;
+        const dx = faults.x[i] - fx, dy = faults.y[i] - fy;
+        if (dx * dx + dy * dy < R * R) nearby++;
+      }
+    }
+  }
+  let mmVisible;
+  if (nearby > 200) mmVisible = 40;
+  else if (nearby > 80) mmVisible = 22;
+  else if (nearby > 25) mmVisible = 12;
+  else if (nearby > 8) mmVisible = 6;
+  else mmVisible = 3;
+
+  const { w, h } = getCssSize();
+  return { zoom: Math.min(w, h) / mmVisible, nearby };
+}
+
+// ============================================================
+// UI: FAULT LIST (VIRTUALIZED)
+// ============================================================
+const listWrap = document.getElementById('fault-list-wrap');
+const listSpacer = document.getElementById('fault-list-spacer');
+const ROW_H = 42;
+let visibleRows = new Map(); // i -> DOM element
+
+function renderFaultList() {
+  const { offset, length } = getFilteredIndices(view.filter);
+  document.getElementById('list-count').textContent =
+    length.toLocaleString() + ' faults';
+
+  listSpacer.style.height = (length * ROW_H) + 'px';
+  visibleRows.clear();
+  listSpacer.innerHTML = '';
+  updateVirtualList();
+}
+
+function updateVirtualList() {
+  const { offset, length } = getFilteredIndices(view.filter);
+  const top = listWrap.scrollTop;
+  const h = listWrap.clientHeight;
+  const startRow = Math.max(0, ((top / ROW_H) | 0) - 4);
+  const endRow = Math.min(length, ((top + h) / ROW_H | 0) + 4);
+
+  const wanted = new Set();
+  for (let r = startRow; r < endRow; r++) wanted.add(r);
+
+  // Remove rows that are no longer visible
+  for (const [r, el] of visibleRows) {
+    if (!wanted.has(r)) {
+      el.remove();
+      visibleRows.delete(r);
+    }
+  }
+
+  // Add new rows
+  for (const r of wanted) {
+    if (visibleRows.has(r)) continue;
+    const idx = sortedOrder[offset + r];
+    const row = renderRow(idx, r);
+    listSpacer.appendChild(row);
+    visibleRows.set(r, row);
+  }
+}
+
+function renderRow(idx, rowIndex) {
+  const sev = faults.sev[idx];
+  const x = faults.x[idx], y = faults.y[idx];
+  const t = FAULT_TYPES[faults.type[idx]];
+  const dieX = Math.floor(x / 8) + 18;
+  const dieY = Math.floor(y / 8) + 18;
+  const sevName = ['low', 'med', 'high', 'crit'][sev];
+
+  const div = document.createElement('div');
+  div.className = 'fault-row' + (idx === view.selectedIdx ? ' selected' : '');
+  div.style.top = (rowIndex * ROW_H) + 'px';
+  div.dataset.idx = idx;
+  div.innerHTML = `
+    <span class="fault-sev sev-${sevName}"></span>
+    <div class="fault-info">
+      <div class="fault-id">#${(idx + 1).toString().padStart(6, '0')}</div>
+      <div class="fault-meta">${x >= 0 ? '+' : ''}${x.toFixed(1)}, ${y >= 0 ? '+' : ''}${y.toFixed(1)} mm · D${dieX.toString().padStart(2, '0')}-${dieY.toString().padStart(2, '0')}</div>
+    </div>
+    <span class="fault-type-tag">${t}</span>
+  `;
+  div.addEventListener('click', () => selectFault(idx));
+  return div;
+}
+
+listWrap.addEventListener('scroll', updateVirtualList);
+
+// Filter chips
+document.querySelectorAll('.filter-chip').forEach(c => {
+  c.addEventListener('click', () => {
+    document.querySelectorAll('.filter-chip').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    view.filter = c.dataset.filter;
+    view.filterSev = c.dataset.filter === 'all' ? null : parseInt(c.dataset.filter);
+    listWrap.scrollTop = 0;
+    renderFaultList();
+  });
+});
+
+// ============================================================
+// UI: DETAIL PANEL
+// ============================================================
+function renderDetail(idx) {
+  const emptyEl = document.getElementById('detail-empty');
+  const contentEl = document.getElementById('detail-content');
+  const statusEl = document.getElementById('detail-status');
+
+  if (idx < 0) {
+    emptyEl.style.display = 'grid';
+    contentEl.style.display = 'none';
+    statusEl.textContent = 'no selection';
+    return;
+  }
+  emptyEl.style.display = 'none';
+  contentEl.style.display = 'block';
+
+  const x = faults.x[idx], y = faults.y[idx];
+  const sev = faults.sev[idx];
+  const t = FAULT_TYPES[faults.type[idx]];
+  const sz = faults.size[idx] / 100;
+  const dieX = Math.floor(x / 8) + 18;
+  const dieY = Math.floor(y / 8) + 18;
+  const dieID = `D${dieX.toString().padStart(2, '0')}-${dieY.toString().padStart(2, '0')}`;
+  statusEl.textContent = 'locked · ' + dieID;
+
+  const sevLabel = SEV_LABELS[sev];
+  const sevPct = [25, 55, 78, 96][sev];
+  const sevColorVar = ['green', 'yellow', 'orange', 'red'][sev];
+  const sevName = ['low', 'med', 'high', 'crit'][sev];
+
+  contentEl.innerHTML = `
+    <div class="detail-section">
+      <div class="detail-section-title">IDENTIFIER</div>
+      <div class="detail-id">#${(idx + 1).toString().padStart(6, '0')}</div>
+      <div class="detail-id-sub">${t} · ${dieID}</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-section-title">SEVERITY</div>
+      <div class="sev-bar">
+        <span class="fault-sev sev-${sevName}"></span>
+        <span class="mono" style="font-size:11px; color:var(--text); min-width:64px;">${sevLabel}</span>
+        <div class="sev-bar-track">
+          <div class="sev-bar-fill" style="width:${sevPct}%; background:var(--${sevColorVar});"></div>
+        </div>
+      </div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-section-title">COORDINATES</div>
+      <div class="detail-grid">
+        <div class="detail-field"><div class="detail-key">X</div><div class="detail-val">${x.toFixed(3)}<span class="u">mm</span></div></div>
+        <div class="detail-field"><div class="detail-key">Y</div><div class="detail-val">${y.toFixed(3)}<span class="u">mm</span></div></div>
+        <div class="detail-field"><div class="detail-key">SIZE</div><div class="detail-val">${sz.toFixed(2)}<span class="u">μm</span></div></div>
+        <div class="detail-field"><div class="detail-key">RADIAL</div><div class="detail-val">${Math.sqrt(x*x + y*y).toFixed(2)}<span class="u">mm</span></div></div>
+      </div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-section-title">NAVIGATE</div>
+      <div class="nav-row">
+        <button class="nav-btn" id="btn-prev">◀ PREV</button>
+        <button class="nav-btn" id="btn-next">NEXT ▶</button>
+      </div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-section-title">ACTIONS</div>
+      <div class="detail-actions">
+        <button class="detail-btn primary">REVIEWED</button>
+        <button class="detail-btn">FLAG</button>
+        <button class="detail-btn">EXPORT</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('btn-prev').onclick = () => navigateRelative(-1);
+  document.getElementById('btn-next').onclick = () => navigateRelative(+1);
+}
+
+function findSortedPosition(idx) {
+  // Linear search via sevStarts. Faster than scanning full sortedOrder.
+  const sev = faults.sev[idx];
+  const rank = 3 - sev;
+  const start = sevStarts[rank];
+  const end = sevStarts[rank + 1];
+  // Limit linear scan within that bucket
+  for (let i = start; i < end; i++) {
+    if (sortedOrder[i] === idx) return i;
+  }
+  return -1;
+}
+
+function navigateRelative(dir) {
+  const { offset, length } = getFilteredIndices(view.filter);
+  if (length === 0) return;
+  if (view.selectedIdx < 0) {
+    selectFault(sortedOrder[offset]);
+    return;
+  }
+  // Find current position in sortedOrder
+  let pos = findSortedPosition(view.selectedIdx);
+  if (pos < 0) {
+    selectFault(sortedOrder[offset]);
+    return;
+  }
+  // Check if it's in the current filter range
+  if (pos < offset || pos >= offset + length) {
+    selectFault(sortedOrder[offset]);
+    return;
+  }
+  const relPos = pos - offset;
+  const newRelPos = ((relPos + dir) % length + length) % length;
+  selectFault(sortedOrder[offset + newRelPos]);
+}
+
+// ============================================================
+// ACTIONS
+// ============================================================
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function selectFault(idx, opts = {}) {
+  if (idx < 0 || idx >= faults.count) return;
+  view.selectedIdx = idx;
+  const { zoom: tz, nearby } = computeAutoZoom(idx);
+  animateTo(faults.x[idx], faults.y[idx], tz, opts.dur || 700);
+
+  // Highlight in list, scroll to it
+  if (!opts.fromList) {
+    const pos = findSortedPosition(idx);
+    if (pos >= 0) {
+      const { offset, length } = getFilteredIndices(view.filter);
+      if (pos >= offset && pos < offset + length) {
+        const relPos = pos - offset;
+        listWrap.scrollTop = relPos * ROW_H - listWrap.clientHeight / 2;
+      }
+    }
+  }
+
+  renderDetail(idx);
+  // Update row classes
+  for (const [r, el] of visibleRows) {
+    el.classList.toggle('selected', parseInt(el.dataset.idx) === idx);
+  }
+
+  if (!opts.silent) {
+    const zoomLabel = (tz / view.fitZoom).toFixed(1);
+    showToast(`→ #${(idx + 1).toString().padStart(6, '0')} · CLUSTER:${nearby} · AUTO-FIT ${zoomLabel}×`);
+  }
+}
+
+// ============================================================
+// INTERACTION
+// ============================================================
+clickLayer.addEventListener('mousemove', (e) => {
+  const rect = clickLayer.getBoundingClientRect();
+  const sx = e.clientX - rect.left;
+  const sy = e.clientY - rect.top;
+  const w = s2w(sx, sy);
+  if (Math.sqrt(w.x * w.x + w.y * w.y) < WAFER_R) {
+    document.getElementById('view-coord-label').textContent =
+      `${w.x >= 0 ? '+' : ''}${w.x.toFixed(2)}, ${w.y >= 0 ? '+' : ''}${w.y.toFixed(2)} MM`;
+    view.cursor = { x: sx, y: sy };
+  } else {
+    document.getElementById('view-coord-label').textContent = '— , —';
+    view.cursor = null;
+  }
+  scheduleRender();
+});
+clickLayer.addEventListener('mouseleave', () => {
+  view.cursor = null;
+  scheduleRender();
+});
+
+clickLayer.addEventListener('click', (e) => {
+  const rect = clickLayer.getBoundingClientRect();
+  const sx = e.clientX - rect.left;
+  const sy = e.clientY - rect.top;
+  const wld = s2w(sx, sy);
+
+  if (Math.sqrt(wld.x * wld.x + wld.y * wld.y) > WAFER_R) return;
+
+  if (view.navMode === 'smart') {
+    const nearest = findNearest(wld.x, wld.y, view.filterSev);
+    if (nearest < 0) return;
+    const fp = w2s(faults.x[nearest], faults.y[nearest]);
+    view.hoverPath = { from: { x: sx, y: sy }, to: fp, start: performance.now() };
+    selectFault(nearest);
+  } else {
+    const newZoom = Math.min(view.fitZoom * 50, view.zoom * 2);
+    animateTo(wld.x, wld.y, newZoom, 350);
+    showToast(`ZOOM ${(newZoom / view.fitZoom).toFixed(1)}× · CONTINUE CLICKING…`);
+  }
+});
+
+// Zoom controls
+document.querySelectorAll('.vp-btn[data-zoom]').forEach(b => {
+  b.addEventListener('click', () => {
+    const z = b.dataset.zoom;
+    if (z === 'fit') {
+      animateTo(0, 0, view.fitZoom, 500);
+    } else {
+      animateTo(view.cameraX, view.cameraY, view.fitZoom * parseFloat(z), 400);
+    }
+  });
+});
+
+// Mode controls
+document.querySelectorAll('.vp-btn[data-mode]').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.vp-btn[data-mode]').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    view.mode = b.dataset.mode;
+    document.getElementById('view-mode-label').textContent =
+      view.mode === 'density' ? 'DENSITY' : 'DOTS';
+    scheduleRender();
+  });
+});
+
+// Nav mode
+document.querySelectorAll('.mode-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.mode-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    view.navMode = b.dataset.nav;
+    const info = document.getElementById('mode-info');
+    if (view.navMode === 'smart') {
+      info.innerHTML = '<b>SMART NAV</b> — 어디든 클릭하면 가장 가까운 fault로 즉시 점프합니다. 클러스터 밀도에 따라 배율이 자동으로 맞춰집니다.';
+    } else {
+      info.innerHTML = '<b>TRADITIONAL</b> — 클릭한 위치로 단순 줌인. 빈 영역을 헛클릭하다 fault를 찾아 내려가는 기존 방식입니다.';
+    }
+  });
+});
+
+// Wheel zoom
+clickLayer.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const rect = clickLayer.getBoundingClientRect();
+  const sx = e.clientX - rect.left;
+  const sy = e.clientY - rect.top;
+  const before = s2w(sx, sy);
+  const factor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+  view.zoom = Math.max(view.fitZoom * 0.8, Math.min(view.fitZoom * 50, view.zoom * factor));
+  const after = s2w(sx, sy);
+  view.cameraX += before.x - after.x;
+  view.cameraY += before.y - after.y;
+  scheduleRender();
+}, { passive: false });
+
+// Touch pan + pinch
+let touchState = null;
+clickLayer.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 1) {
+    touchState = { mode: 'pan', x: e.touches[0].clientX, y: e.touches[0].clientY, moved: false };
+  } else if (e.touches.length === 2) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    touchState = { mode: 'pinch', d: Math.hypot(dx, dy), zoom: view.zoom };
+  }
+}, { passive: true });
+clickLayer.addEventListener('touchmove', (e) => {
+  if (!touchState) return;
+  if (touchState.mode === 'pan' && e.touches.length === 1) {
+    const dx = e.touches[0].clientX - touchState.x;
+    const dy = e.touches[0].clientY - touchState.y;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) touchState.moved = true;
+    view.cameraX -= dx / view.zoom;
+    view.cameraY -= dy / view.zoom;
+    touchState.x = e.touches[0].clientX;
+    touchState.y = e.touches[0].clientY;
+    scheduleRender();
+  } else if (touchState.mode === 'pinch' && e.touches.length === 2) {
+    const dx = e.touches[0].clientX - e.touches[1].clientX;
+    const dy = e.touches[0].clientY - e.touches[1].clientY;
+    const d = Math.hypot(dx, dy);
+    view.zoom = Math.max(view.fitZoom * 0.8, Math.min(view.fitZoom * 50, touchState.zoom * d / touchState.d));
+    scheduleRender();
+  }
+  e.preventDefault();
+}, { passive: false });
+clickLayer.addEventListener('touchend', (e) => {
+  if (touchState && touchState.mode === 'pan' && !touchState.moved) {
+    // Treat as tap
+    const rect = clickLayer.getBoundingClientRect();
+    const sx = (e.changedTouches[0].clientX) - rect.left;
+    const sy = (e.changedTouches[0].clientY) - rect.top;
+    const wld = s2w(sx, sy);
+    if (Math.sqrt(wld.x * wld.x + wld.y * wld.y) < WAFER_R) {
+      if (view.navMode === 'smart') {
+        const nearest = findNearest(wld.x, wld.y, view.filterSev);
+        if (nearest >= 0) {
+          const fp = w2s(faults.x[nearest], faults.y[nearest]);
+          view.hoverPath = { from: { x: sx, y: sy }, to: fp, start: performance.now() };
+          selectFault(nearest);
+        }
+      }
+    }
+  }
+  touchState = null;
+}, { passive: true });
+
+// Keyboard
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'n' || e.key === 'N' || e.key === 'ArrowRight') navigateRelative(+1);
+  if (e.key === 'p' || e.key === 'P' || e.key === 'ArrowLeft') navigateRelative(-1);
+  if (e.key === 'f' || e.key === 'F') animateTo(0, 0, view.fitZoom, 500);
+});
+
+window.addEventListener('resize', resize);
+
+// Clock
+function updateClock() {
+  const d = new Date();
+  const t = d.toTimeString().slice(0, 8);
+  document.getElementById('view-clock').textContent = t;
+}
+setInterval(updateClock, 1000);
+
+// ============================================================
+// INIT
+// ============================================================
+async function init() {
+  try {
+    await generateFaults();
+    await buildSpatialIndex();
+    await buildSortedIndex();
+    await initGL();
+    setLoadingStatus('READY');
+    await nextFrame();
+    resize();
+    renderFaultList();
+    renderDetail(-1);
+    scheduleRender();
+    document.getElementById('loading').classList.add('fadeout');
+    setTimeout(() => document.getElementById('loading').remove(), 600);
+  } catch (err) {
+    console.error(err);
+    setLoadingStatus('ERROR: ' + err.message);
+  }
+}
+
+init();
+</script>
+</body>
+</html>
