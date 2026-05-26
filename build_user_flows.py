@@ -134,6 +134,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .search-box::before { content: '⌕ '; color: var(--text-dim); font-size: 10px; }
 
+  .gather-btn {
+    position: fixed; bottom: 60px; left: 268px; z-index: 5;
+    background: var(--bg-2); border: 1px solid var(--line);
+    color: var(--text); font-family: inherit;
+    font-size: 10px; letter-spacing: 0.2em;
+    padding: 9px 14px; cursor: pointer;
+    display: none;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .gather-btn.on { display: block; }
+  .gather-btn:hover { border-color: var(--amber); color: var(--amber); }
+  .gather-btn.active { color: var(--amber); border-color: var(--amber); background: rgba(232,160,74,0.08); }
+
   .tooltip {
     position: fixed; z-index: 7; background: var(--bg-2);
     border: 1px solid var(--line); padding: 10px 14px;
@@ -287,6 +300,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <input type="text" id="search" placeholder="filter..." autocomplete="off">
 </div>
 
+<button class="gather-btn" id="gather-btn" onclick="toggleGather()">GATHER BY DOMAIN</button>
+
 <div class="tooltip" id="tooltip">
   <div class="ip" id="tt-ip"></div>
   <div class="meta" id="tt-meta"></div>
@@ -413,16 +428,32 @@ const ipParticles = ipList.map(d => {
 });
 const tableParticles = tableList.map(d => {
   const domain = tableDomains[d.table];
-  const c = domainCenters[domain] || { x: vw/2, y: vh/2 };
   const r = Math.log(d.count + 1) * 3 + 4;
   return {
     table: d.table, calls: d.calls, count: d.count,
-    x: c.x + (Math.random() - 0.5) * 80,
-    y: c.y + (Math.random() - 0.5) * 80,
-    vx: (Math.random() - 0.5) * 0.2, vy: (Math.random() - 0.5) * 0.2,
+    x: Math.random() * vw, y: Math.random() * vh,
+    vx: (Math.random() - 0.5) * 0.5, vy: (Math.random() - 0.5) * 0.5,
     r, hue: hashHue(d.table), domain, hover: false,
   };
 });
+
+// gather state
+let clustered = false;
+function toggleGather() {
+  clustered = !clustered;
+  const btn = document.getElementById('gather-btn');
+  btn.classList.toggle('active', clustered);
+  btn.textContent = clustered ? 'SCATTER' : 'GATHER BY DOMAIN';
+  // give an impulse on scatter so particles spread out instead of slowly drifting
+  if (!clustered) {
+    for (const p of tableParticles) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 2 + Math.random() * 2.5;
+      p.vx += Math.cos(angle) * speed;
+      p.vy += Math.sin(angle) * speed;
+    }
+  }
+}
 
 const searchInput = document.getElementById('search');
 searchInput.addEventListener('input', e => { filterQuery = e.target.value.trim().toLowerCase(); });
@@ -457,6 +488,7 @@ function refreshHeader() {
       <span class="n">${ipList.length}</span>IPs &nbsp;·&nbsp;
       <span class="n">${CALLS.length.toLocaleString()}</span>CALLS`;
     document.getElementById('search').placeholder = 'filter by ip...';
+    document.getElementById('gather-btn').classList.remove('on');
   } else {
     document.getElementById('title').textContent = 'Table Flows';
     document.getElementById('title').classList.remove('ip-mode');
@@ -465,6 +497,7 @@ function refreshHeader() {
       <span class="n">${tableList.length}</span>TABLES &nbsp;·&nbsp;
       <span class="n">${CALLS.length.toLocaleString()}</span>CALLS`;
     document.getElementById('search').placeholder = 'filter by table...';
+    document.getElementById('gather-btn').classList.add('on');
   }
   document.getElementById('legend').classList.remove('on');
   document.getElementById('search-box').classList.add('on');
@@ -510,12 +543,44 @@ function renderIpParticles() {
 
 // --- TABLE PARTICLES ---
 function renderTableParticles() {
+  // domain labels — only when clustered
+  if (clustered) {
+    ctx.save();
+    ctx.font = '600 11px JetBrains Mono';
+    ctx.fillStyle = 'rgba(245,241,232,0.4)';
+    ctx.textAlign = 'center';
+    for (const [domain, center] of Object.entries(domainCenters)) {
+      ctx.fillText(domain.toUpperCase(), center.x, center.y - 90);
+    }
+    ctx.restore();
+  }
+
   let hoverP = null;
   for (const p of tableParticles) {
     if (!ipVisible(p.table)) continue;
+
+    // attraction to domain center — only when clustered
+    if (clustered) {
+      const center = domainCenters[p.domain];
+      if (center) {
+        const dx = center.x - p.x;
+        const dy = center.y - p.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const force = Math.min(0.05, dist * 0.0006);
+        p.vx += (dx / dist) * force;
+        p.vy += (dy / dist) * force;
+      }
+    }
+    p.vx *= 0.97; p.vy *= 0.97;
+    p.vx += (Math.random() - 0.5) * 0.04;
+    p.vy += (Math.random() - 0.5) * 0.04;
+
     p.x += p.vx; p.y += p.vy;
-    if (p.x < p.r || p.x > vw - p.r) p.vx *= -1;
-    if (p.y < p.r || p.y > vh - p.r) p.vy *= -1;
+    if (p.x < p.r) { p.x = p.r; p.vx *= -0.3; }
+    if (p.x > vw - p.r) { p.x = vw - p.r; p.vx *= -0.3; }
+    if (p.y < p.r) { p.y = p.r; p.vy *= -0.3; }
+    if (p.y > vh - p.r) { p.y = vh - p.r; p.vy *= -0.3; }
+
     const d = Math.hypot(p.x - mouseX, p.y - mouseY);
     p.hover = d < p.r + 4;
     if (p.hover) hoverP = p;
@@ -535,7 +600,7 @@ function renderTableParticles() {
     document.getElementById('tt-ip').textContent = hoverP.table;
     const fns = new Set(hoverP.calls.map(c => c.function));
     const ips = new Set(hoverP.calls.map(c => c.ip));
-    document.getElementById('tt-meta').textContent = `${hoverP.count.toLocaleString()} calls · ${fns.size} functions · ${ips.size} IPs`;
+    document.getElementById('tt-meta').textContent = `${(hoverP.domain||'').toUpperCase()} · ${hoverP.count.toLocaleString()} calls · ${fns.size} functions · ${ips.size} IPs`;
     document.getElementById('tt-meta').style.whiteSpace = 'nowrap';
     tt.style.display = 'block';
     tt.style.left = (mouseX + 14) + 'px'; tt.style.top = (mouseY + 14) + 'px';
@@ -750,6 +815,7 @@ function selectIP(ip) {
   document.getElementById('legend').classList.add('on');
   document.getElementById('search-box').classList.remove('on');
   document.getElementById('view-toggle').classList.add('hidden');
+  document.getElementById('gather-btn').classList.remove('on');
   document.getElementById('hint').textContent = 'CLICK BAR FOR SQL';
   closePanel();
 }
