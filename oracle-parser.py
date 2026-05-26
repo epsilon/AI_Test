@@ -425,3 +425,18 @@ df['start_ts'] = pd.to_datetime(df['start_ts'], format='%Y-%m-%d %H:%M:%S,%f')
 df['end_ts']   = pd.to_datetime(df['end_ts'],   format='%Y-%m-%d %H:%M:%S,%f')
 df['duration_ms'] = (df['end_ts'] - df['start_ts']).dt.total_seconds() * 1000
 df = df.sort_values('start_ts').reset_index(drop=True)
+
+# table column 추가
+import sqlglot
+from sqlglot import exp
+
+def _extract(sql):
+    try:
+        return list({t.name.lower() for t in sqlglot.parse_one(sql, dialect='oracle').find_all(exp.Table)})
+    except Exception:
+        return []
+
+df['tables'] = df['sqls'].apply(
+    lambda sqls: list({t for sql in (sqls or []) for t in _extract(sql)})
+)
+
