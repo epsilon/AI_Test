@@ -725,6 +725,12 @@ let usersDragMoved = false;
 const mappedCalls = CALLS.filter(c => c.session_user_id);
 const unmappedCalls = CALLS.filter(c => !c.session_user_id);
 
+function _functionsOf(calls) {
+  const cnt = {};
+  for (const c of calls) cnt[c.function] = (cnt[c.function] || 0) + 1;
+  return Object.entries(cnt).sort((a, b) => b[1] - a[1]).map(e => e[0]);
+}
+
 // mapped users
 const callsByUser = {};
 for (const c of mappedCalls) {
@@ -732,7 +738,7 @@ for (const c of mappedCalls) {
   (callsByUser[u] = callsByUser[u] || []).push(c);
 }
 const userItems = Object.entries(callsByUser)
-  .map(([user, calls]) => ({ key: user, calls, value: calls.length }))
+  .map(([user, calls]) => ({ key: user, calls, value: calls.length, functions: _functionsOf(calls) }))
   .sort((a, b) => b.value - a.value);
 
 // mapped calls grouped by table
@@ -743,7 +749,7 @@ for (const c of mappedCalls) {
   }
 }
 const mappedTableItems = Object.entries(callsByMappedTable)
-  .map(([t, calls]) => ({ key: t, calls, value: calls.length }))
+  .map(([t, calls]) => ({ key: t, calls, value: calls.length, functions: _functionsOf(calls) }))
   .sort((a, b) => b.value - a.value);
 
 // unmapped calls grouped by table
@@ -754,7 +760,7 @@ for (const c of unmappedCalls) {
   }
 }
 const unmappedTableItems = Object.entries(callsByUnmappedTable)
-  .map(([t, calls]) => ({ key: t, calls, value: calls.length }))
+  .map(([t, calls]) => ({ key: t, calls, value: calls.length, functions: _functionsOf(calls) }))
   .sort((a, b) => b.value - a.value);
 
 function currentUsersItems() {
@@ -896,10 +902,38 @@ function renderUsersView() {
         ? r.key.slice(0, Math.max(1, maxChars - 1)) + '…'
         : r.key;
       ctx.fillText(txt, sx + 8, sy + labelSize + 4);
+      let nextY = sy + labelSize + 4;
       if (sh > labelSize * 2.4) {
         ctx.fillStyle = 'rgba(10,10,12,0.65)';
         ctx.font = `${Math.max(9, labelSize * 0.55)}px JetBrains Mono`;
-        ctx.fillText(r.value.toLocaleString() + ' calls', sx + 8, sy + labelSize + 4 + labelSize * 0.75);
+        nextY = sy + labelSize + 4 + labelSize * 0.75;
+        ctx.fillText(r.value.toLocaleString() + ' calls · ' + (r.functions ? r.functions.length : 0) + ' fns', sx + 8, nextY);
+      }
+      // function list — show as many as fit
+      if (r.functions && sh > labelSize * 4) {
+        const fnSize = Math.max(8, labelSize * 0.5);
+        const lineH = fnSize * 1.35;
+        const listTop = nextY + lineH * 0.6;
+        const available = sh - (listTop - sy) - 6;
+        const maxLines = Math.floor(available / lineH);
+        const fnMaxChars = Math.floor((sw - 16) / (fnSize * 0.6));
+        ctx.font = `${fnSize}px JetBrains Mono`;
+        ctx.fillStyle = 'rgba(10,10,12,0.55)';
+        const total = r.functions.length;
+        const showCount = Math.max(0, Math.min(total, maxLines));
+        const reservedForMore = total > maxLines ? 1 : 0;
+        const shown = r.functions.slice(0, Math.max(0, showCount - reservedForMore));
+        let yy = listTop + fnSize;
+        for (const fn of shown) {
+          const s = shortFn(fn);
+          const t2 = s.length > fnMaxChars ? s.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : s;
+          ctx.fillText(t2, sx + 8, yy);
+          yy += lineH;
+        }
+        if (reservedForMore) {
+          ctx.fillStyle = 'rgba(10,10,12,0.45)';
+          ctx.fillText('+ ' + (total - shown.length) + ' more', sx + 8, yy);
+        }
       }
     }
   }
