@@ -1283,19 +1283,19 @@ function _drawGroup(g, hoverBoxOut) {
   const c = g.call;
   const tables = c.tables || [];
 
-  // group container — wrap tables in a function box
+  // group container
   ctx.fillStyle = g.isSelected ? 'rgba(232, 160, 74, 0.06)' : 'rgba(245, 241, 232, 0.02)';
   ctx.fillRect(g.x, g.y, g.w, g.h);
   ctx.strokeStyle = g.isSelected ? 'rgba(232, 160, 74, 0.55)' : 'rgba(139, 134, 128, 0.35)';
   ctx.lineWidth = g.isSelected ? 1.5 : 1;
   ctx.strokeRect(g.x, g.y, g.w, g.h);
 
-  // function name + cache (group header)
+  // function name header
   ctx.fillStyle = g.isSelected ? 'rgba(232, 160, 74, 1)' : 'rgba(245,241,232,0.92)';
   ctx.font = 'bold 11px JetBrains Mono';
   ctx.textAlign = 'left';
   const fn = shortFn(c.function || '');
-  const headerTxt = fn + (g.isSelected ? '  ←' : '');
+  const headerTxt = (g.isSelected ? '★  ' : '') + fn;
   const maxHeader = Math.floor((g.w - 90) / 7);
   const shownFn = headerTxt.length > maxHeader ? headerTxt.slice(0, maxHeader-1) + '…' : headerTxt;
   ctx.fillText(shownFn, g.x + 8, g.y + 15);
@@ -1317,24 +1317,16 @@ function _drawGroup(g, hoverBoxOut) {
 
   if (!tables.length) return [];
 
-  // table layout — horizontal, with gap for relation labels
-  const tableH = 36;
-  const minTableW = 90;
-  const maxTableW = 150;
-  const relGap = 75;
-  
-  const n = Math.min(tables.length, 4);
+  // === VERTICAL table stack ===
+  const tableH = 26;
+  const tableW = Math.min(190, g.w - 24);
+  const relGap = 28;  // vertical space for relation label
+  const n = Math.min(tables.length, 3);
   const shownTables = tables.slice(0, n);
-  const availW = g.w - 16;
-  const idealTotal = n * maxTableW + (n-1) * relGap;
-  let tableW;
-  if (idealTotal <= availW) tableW = maxTableW;
-  else tableW = Math.max(minTableW, (availW - (n-1) * relGap) / n);
-  const totalW = n * tableW + (n-1) * relGap;
-  const startX = g.x + (g.w - totalW) / 2;
-  const tableY = g.y + 28;
+  const tableX = g.x + (g.w - tableW) / 2;
+  const tableYStart = g.y + 30;
 
-  // relations between visible table pairs
+  // relations
   const visibleIdx = new Map();
   shownTables.forEach((t, i) => visibleIdx.set(t, i));
   const rels = [];
@@ -1356,42 +1348,33 @@ function _drawGroup(g, hoverBoxOut) {
     }
   }
 
-  // draw relation lines first (so boxes overlay)
+  // vertical relation lines (between adjacent boxes)
   for (const r of rels) {
-    if (r.to - r.from > 1) continue;  // only adjacent for now
-    const fromX = startX + r.from * (tableW + relGap) + tableW;
-    const toX = startX + r.to * (tableW + relGap);
-    const lineY = tableY + tableH / 2;
-    
-    if (r.type === 'join') {
-      ctx.strokeStyle = 'rgba(217, 130, 100, 0.9)';
-      ctx.lineWidth = 1.8;
-    } else {
-      ctx.strokeStyle = 'rgba(140, 200, 220, 0.9)';
-      ctx.lineWidth = 1.8;
-    }
+    if (r.to - r.from > 1) continue;
+    const fromY = tableYStart + r.from * (tableH + relGap) + tableH;
+    const toY = tableYStart + r.to * (tableH + relGap);
+    const lineX = tableX + tableW / 2;
+    ctx.strokeStyle = r.type === 'join' ? 'rgba(217, 130, 100, 0.9)' : 'rgba(140, 200, 220, 0.9)';
+    ctx.lineWidth = 1.8;
     ctx.beginPath();
-    ctx.moveTo(fromX, lineY);
-    ctx.lineTo(toX, lineY);
+    ctx.moveTo(lineX, fromY);
+    ctx.lineTo(lineX, toY);
     ctx.stroke();
   }
 
-  // collect hits for hover detection
+  // table boxes (stacked)
   const hits = [];
-
-  // draw tables
   for (let i = 0; i < n; i++) {
     const t = shownTables[i];
     const isSelected = t === lineageSelected;
-    const tx = startX + i * (tableW + relGap);
-    const ty = tableY;
+    const tx = tableX;
+    const ty = tableYStart + i * (tableH + relGap);
 
     const hue = hashHue(t);
     const isHover = mouseX >= tx && mouseX <= tx + tableW && mouseY >= ty && mouseY <= ty + tableH;
     if (isHover && !isSelected) hoverBoxOut.box = { table: t };
 
     if (isSelected) {
-      // selected — thick double border + bright fill
       ctx.fillStyle = `hsla(${hue}, 65%, 60%, 0.98)`;
       ctx.fillRect(tx, ty, tableW, tableH);
       ctx.strokeStyle = 'rgba(245,241,232,0.95)';
@@ -1419,66 +1402,78 @@ function _drawGroup(g, hoverBoxOut) {
     hits.push({ table: t, rect: { x: tx, y: ty, w: tableW, h: tableH } });
   }
 
-  // draw relation labels (over the line)
+  // relation labels (centered on vertical line)
   for (const r of rels) {
     if (r.to - r.from > 1) continue;
-    const fromX = startX + r.from * (tableW + relGap) + tableW;
-    const toX = startX + r.to * (tableW + relGap);
-    const midX = (fromX + toX) / 2;
-    const lineY = tableY + tableH / 2;
+    const fromY = tableYStart + r.from * (tableH + relGap) + tableH;
+    const toY = tableYStart + r.to * (tableH + relGap);
+    const midY = (fromY + toY) / 2;
+    const labelX = tableX + tableW / 2;
 
     if (r.type === 'join') {
       ctx.font = '9px JetBrains Mono';
       const labelW = ctx.measureText(r.label).width + 10;
       ctx.fillStyle = 'rgba(18,14,12,0.95)';
-      ctx.fillRect(midX - labelW/2, lineY - 8, labelW, 16);
+      ctx.fillRect(labelX - labelW/2, midY - 8, labelW, 16);
       ctx.strokeStyle = 'rgba(217, 130, 100, 0.8)';
       ctx.lineWidth = 1;
-      ctx.strokeRect(midX - labelW/2, lineY - 8, labelW, 16);
+      ctx.strokeRect(labelX - labelW/2, midY - 8, labelW, 16);
       ctx.fillStyle = 'rgba(232, 180, 140, 1)';
       ctx.textAlign = 'center';
-      ctx.fillText(r.label, midX, lineY + 3);
+      ctx.fillText(r.label, labelX, midY + 3);
     } else {
-      // UNION: big + sign
       ctx.fillStyle = 'rgba(18,14,12,0.95)';
-      ctx.fillRect(midX - 14, lineY - 14, 28, 28);
+      ctx.fillRect(labelX - 13, midY - 13, 26, 26);
       ctx.strokeStyle = 'rgba(140, 200, 220, 0.8)';
       ctx.lineWidth = 1.5;
-      ctx.strokeRect(midX - 14, lineY - 14, 28, 28);
+      ctx.strokeRect(labelX - 13, midY - 13, 26, 26);
       ctx.fillStyle = 'rgba(140, 200, 220, 1)';
-      ctx.font = 'bold 22px JetBrains Mono';
+      ctx.font = 'bold 20px JetBrains Mono';
       ctx.textAlign = 'center';
-      ctx.fillText('+', midX, lineY + 8);
+      ctx.fillText('+', labelX, midY + 7);
     }
   }
 
-  // extra tables hint
+  // stack end Y
+  const stackEnd = tableYStart + n * tableH + (n-1) * relGap;
+
   if (tables.length > n) {
     ctx.fillStyle = 'rgba(139,134,128,0.7)';
     ctx.font = '8px JetBrains Mono';
     ctx.textAlign = 'left';
-    ctx.fillText(`+ ${tables.length - n} more tables`, g.x + 4, tableY + tableH + 12);
+    ctx.fillText(`+ ${tables.length - n} more tables`, g.x + 8, stackEnd + 12);
   }
 
-  // WHERE values
+  // WHERE values — show as much as fits
   const wv = c.where_values || {};
   const wvEntries = Object.entries(wv);
   if (wvEntries.length) {
-    let y = tableY + tableH + (tables.length > n ? 26 : 14);
-    ctx.fillStyle = 'rgba(170, 200, 140, 0.9)';
-    ctx.font = 'bold 8px JetBrains Mono';
+    let y = stackEnd + (tables.length > n ? 24 : 16);
+    ctx.fillStyle = 'rgba(170, 200, 140, 0.95)';
+    ctx.font = 'bold 9px JetBrains Mono';
     ctx.textAlign = 'left';
-    ctx.fillText('WHERE', g.x + 4, y);
-    y += 11;
-    ctx.font = '8px JetBrains Mono';
-    const maxChars = Math.floor((g.w - 8) / 5.5);
-    for (const [col, vals] of wvEntries.slice(0, 4)) {
-      if (y >= g.y + g.h - 2) break;
-      const valArr = vals.slice(0, 3);
-      const txt = `${col}='${valArr.join("','")}'`;
+    ctx.fillText('WHERE', g.x + 8, y);
+    y += 12;
+    ctx.font = '9px JetBrains Mono';
+    ctx.fillStyle = 'rgba(170, 200, 140, 0.88)';
+    const maxChars = Math.floor((g.w - 16) / 5.8);
+    let shownCols = 0;
+    for (const [col, vals] of wvEntries) {
+      if (y >= g.y + g.h - 4) {
+        const left = wvEntries.length - shownCols;
+        if (left > 0) {
+          ctx.fillStyle = 'rgba(139,134,128,0.7)';
+          ctx.font = '8px JetBrains Mono';
+          ctx.fillText(`+ ${left} more columns`, g.x + 8, y);
+        }
+        break;
+      }
+      const valArr = vals.slice(0, 10);
+      const txt = `${col} = '${valArr.join("', '")}'` + (vals.length > 10 ? ` +${vals.length-10}` : '');
       const shown = txt.length > maxChars ? txt.slice(0, maxChars-1) + '…' : txt;
-      ctx.fillText(shown, g.x + 4, y);
-      y += 10;
+      ctx.fillText(shown, g.x + 8, y);
+      y += 11;
+      shownCols++;
     }
   }
 
@@ -1515,7 +1510,7 @@ function renderLineageDetail() {
   ctx.fillStyle = 'rgba(180,180,180,0.85)'; ctx.fillText('TIME →', lx+18, ly+1);
   ctx.restore();
 
-  const maxPatterns = Math.min(patterns.length, 4);
+  const maxPatterns = Math.min(patterns.length, 3);
   if (maxPatterns === 0) {
     ctx.fillStyle = 'rgba(139,134,128,0.7)';
     ctx.font = '12px JetBrains Mono';
