@@ -340,6 +340,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<div class="bottom-controls" id="lineage-controls" style="left: 28px;">
+  <button data-lmetric="count" class="active">BY CALL COUNT</button>
+  <button data-lmetric="duration">BY DURATION</button>
+</div>
+
 <div class="tooltip" id="tooltip">
   <div class="ip" id="tt-ip"></div>
   <div class="meta" id="tt-meta"></div>
@@ -1105,6 +1110,15 @@ document.querySelectorAll('#users-controls button[data-metric]').forEach(btn => 
   });
 });
 
+document.querySelectorAll('#lineage-controls button[data-lmetric]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    lineageMetric = btn.dataset.lmetric;
+    document.querySelectorAll('#lineage-controls button[data-lmetric]').forEach(b =>
+      b.classList.toggle('active', b === btn));
+    _moundsBuildOrUpdate();  // recompute targets for smooth transition
+  });
+});
+
 // --- LINEAGE view ---
 const lineageJoins = {};
 const lineageNext = {};
@@ -1246,62 +1260,143 @@ function _mulberry32(seed) {
 let _moundsCache = null;
 let _moundsCacheVw = 0, _moundsCacheVh = 0;
 
-function _computeMounds() {
+let lineageMetric = 'count';   // 'count' | 'duration'
+let _moundsItems = null;
+let _moundsLastTime = performance.now();
+
+function _moundsBuildOrUpdate() {
   const items = lineageTableItems;
-  const n = items.length;
-  if (!n) { _moundsCache = { items: [], totalWidth: 0 }; return; }
+  if (!items.length) { _moundsItems = []; return; }
+  const sorted = [...items].sort((a, b) => b[lineageMetric] - a[lineageMetric]);
 
   const sideMargin = 40;
   const baseY = vh - 60;
   const topReserved = 140;
   const maxHeight = baseY - topReserved - 30;
-  const maxCount = Math.max(...items.map(it => it.count));
+  const maxV = Math.max(...sorted.map(it => it[lineageMetric]));
 
-  const result = [];
+  const targets = [];
   let cx = sideMargin;
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    const frac = Math.sqrt(it.count / maxCount);
+  for (let i = 0; i < sorted.length; i++) {
+    const it = sorted[i];
+    const v = it[lineageMetric] || 0;
+    const frac = maxV > 0 ? Math.sqrt(v / maxV) : 0;
     const height = 30 + frac * maxHeight;
     const width = 60 + frac * 200;
     const moundCx = cx + width / 2;
-
     let seed = 0;
     for (const ch of it.key) seed = (seed * 31 + ch.charCodeAt(0)) & 0xFFFFFFFF;
-    const rng = _mulberry32(seed || 1);
-
-    // bell curve path with hand-drawn jitter
-    const steps = Math.max(30, Math.floor(width / 6));
-    const halfW = width / 2;
-    const pathPoints = [];
-    for (let j = 0; j <= steps; j++) {
-      const t = j / steps;
-      const u = (t - 0.5) * 4.4;  // -2.2 to 2.2 for nice bell
-      const x = moundCx - halfW + t * width;
-      const y = baseY - Math.exp(-u * u * 0.5) * height;
-      // hand-drawn jitter — small irregular perturbation
-      const jx = (rng() - 0.5) * 2.2;
-      const jy = (rng() - 0.5) * 2.6;
-      pathPoints.push({ x: x + jx, y: y + jy });
-    }
-
-    result.push({
-      table: it.key, it,
-      cx: moundCx, baseY,
-      width, height,
-      pathPoints,
-      bbox: { x: moundCx - halfW - 4, y: baseY - height - 4, w: width + 8, h: height + 8 },
+    targets.push({
+      key: it.key, it,
+      seed: seed || 1,
+      cxTarget: moundCx,
+      widthTarget: width,
+      heightTarget: height,
+      baseY,
     });
     cx += width + 6;
   }
 
-  _moundsCache = { items: result, totalWidth: cx };
+  if (!_moundsItems || _moundsItems.length === 0) {
+    _moundsItems = targets.map(t => ({
+      ...t,
+      cx: t.cxTarget,
+      width: t.widthTarget,
+      height: t.heightTarget,
+    }));
+  } else {
+    const byKey = new Map(_moundsItems.map(m => [m.key, m]));
+    _moundsItems = targets.map(t => {
+      const existing = byKey.get(t.key);
+      if (existing) {
+        return {
+          ...t,
+          cx: existing.cx,
+          width: existing.width,
+          height: existing.height,
+        };
+      } else {
+        return { ...t, cx: t.cxTarget, width: t.widthTarget, height: t.heightTarget };
+      }
+    });
+  }
   _moundsCacheVw = vw;
   _moundsCacheVh = vh;
 }
 
+function _moundsAnimate(dtMs) {
+  if (!_moundsItems) return;
+  const k = Math.min(1, dtMs / 1000 * 4.5);
+  for (const m of _moundsItems) {
+    m.cx += (m.cxTarget - m.cx) * k;
+    m.width += (m.widthTarget - m.width) * k;
+    m.height += (m.heightTarget - m.height) * k;
+  }
+}
+
+// stable jitter cache per mound (computed once for each step)
+const _moundJitterCache = new Map();
+function _getJitterRow(seed, steps) {
+  const key = seed + '_' + steps;
+  let cached = _moundJitterCache.get(key);
+  if (cached) return cached;
+  const rng = _mulberry32(seed);
+  cached = [];
+  for (let j = 0; j <= steps; j++) {
+    cached.push({
+      jx: (rng() - 0.5) * 2.2,
+      jy: (rng() - 0.5) * 2.6,
+    });
+  }
+  _moundJitterCache.set(key, cached);
+  return cached;
+}
+
+function _drawMound(m, time, isHover) {
+  const hue = hashHue(m.key);
+  const halfW = m.width / 2;
+  const steps = Math.max(30, Math.floor(m.width / 6));
+  const jitter = _getJitterRow(m.seed, steps);
+  const baseScreenY = m.baseY * lineageScale + lineageOffY;
+
+  ctx.beginPath();
+  ctx.moveTo((m.cx - halfW) * lineageScale + lineageOffX, baseScreenY);
+  for (let j = 0; j <= steps; j++) {
+    const t = j / steps;
+    const u = (t - 0.5) * 4.4;
+    const x = m.cx - halfW + t * m.width;
+    const y = m.baseY - Math.exp(-u * u * 0.5) * m.height;
+    const heightFromBase = m.baseY - y;
+    const factor = m.height > 0 ? Math.min(1, heightFromBase / m.height) : 0;
+    const phase = m.seed * 0.0007 + j * 0.18;
+    const windX = Math.sin(time * 0.0009 + phase) * 2.5 * factor;
+    const windY = Math.cos(time * 0.0006 + phase * 0.6) * 1.2 * factor;
+    const jt = jitter[j] || { jx: 0, jy: 0 };
+    ctx.lineTo(
+      (x + jt.jx + windX) * lineageScale + lineageOffX,
+      (y + jt.jy + windY) * lineageScale + lineageOffY
+    );
+  }
+  ctx.lineTo((m.cx + halfW) * lineageScale + lineageOffX, baseScreenY);
+  ctx.closePath();
+
+  ctx.fillStyle = isHover ? `hsla(${hue}, 60%, 50%, 0.7)` : `hsla(${hue}, 45%, 42%, 0.5)`;
+  ctx.fill();
+  ctx.strokeStyle = isHover ? `hsla(${hue}, 70%, 75%, 1)` : `hsla(${hue}, 55%, 62%, 0.85)`;
+  ctx.lineWidth = isHover ? 2 : 1.3;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+}
+
 function renderLineageMounds() {
-  if (!_moundsCache || _moundsCacheVw !== vw || _moundsCacheVh !== vh) _computeMounds();
+  const now = performance.now();
+  const dtMs = Math.min(100, now - _moundsLastTime);
+  _moundsLastTime = now;
+
+  if (!_moundsItems || _moundsCacheVw !== vw || _moundsCacheVh !== vh) {
+    _moundsBuildOrUpdate();
+  }
+  _moundsAnimate(dtMs);
 
   // header
   ctx.save();
@@ -1311,7 +1406,8 @@ function renderLineageMounds() {
   ctx.fillText(`${lineageTableItems.length.toLocaleString()} tables · usage lineage`, vw/2, 88);
   ctx.fillStyle = 'rgba(139,134,128,0.85)';
   ctx.font = '10px JetBrains Mono';
-  ctx.fillText(`each mound = one table · drag to scroll · scroll wheel to zoom · click for lineage · ${(lineageScale*100).toFixed(0)}%`, vw/2, 112);
+  const metricLabel = lineageMetric === 'count' ? 'CALL COUNT' : 'TOTAL DURATION';
+  ctx.fillText(`each mound = one table · sorted by ${metricLabel} · drag to scroll · click for lineage · ${(lineageScale*100).toFixed(0)}%`, vw/2, 112);
   ctx.restore();
 
   // baseline
@@ -1325,70 +1421,54 @@ function renderLineageMounds() {
 
   // hover detection
   let hover = null;
-  for (const m of _moundsCache.items) {
-    const bx = m.bbox.x * lineageScale + lineageOffX;
-    const by = m.bbox.y * lineageScale + lineageOffY;
-    const bw = m.bbox.w * lineageScale;
-    const bh = m.bbox.h * lineageScale;
+  for (const m of _moundsItems) {
+    const halfW = m.width / 2;
+    const bx = (m.cx - halfW) * lineageScale + lineageOffX;
+    const by = (m.baseY - m.height) * lineageScale + lineageOffY;
+    const bw = m.width * lineageScale;
+    const bh = m.height * lineageScale;
     if (mouseX >= bx && mouseX <= bx + bw && mouseY >= by && mouseY <= by + bh) {
       hover = m;
     }
   }
 
-  // draw mounds — hand-drawn silhouettes
-  for (const m of _moundsCache.items) {
-    const bx = m.bbox.x * lineageScale + lineageOffX;
-    const bw = m.bbox.w * lineageScale;
+  // draw mounds
+  for (const m of _moundsItems) {
+    const halfW = m.width / 2;
+    const bx = (m.cx - halfW) * lineageScale + lineageOffX;
+    const bw = m.width * lineageScale;
     if (bx + bw < -20 || bx > vw + 20) continue;
-
-    const hue = hashHue(m.table);
-    const isHover = (hover === m);
-    const base = (m.baseY) * lineageScale + lineageOffY;
-
-    ctx.beginPath();
-    const fp = m.pathPoints[0];
-    ctx.moveTo(fp.x * lineageScale + lineageOffX, base);
-    for (const p of m.pathPoints) {
-      ctx.lineTo(p.x * lineageScale + lineageOffX, p.y * lineageScale + lineageOffY);
-    }
-    const lp = m.pathPoints[m.pathPoints.length - 1];
-    ctx.lineTo(lp.x * lineageScale + lineageOffX, base);
-    ctx.closePath();
-
-    ctx.fillStyle = isHover ? `hsla(${hue}, 60%, 50%, 0.7)` : `hsla(${hue}, 45%, 42%, 0.5)`;
-    ctx.fill();
-
-    ctx.strokeStyle = isHover ? `hsla(${hue}, 70%, 75%, 1)` : `hsla(${hue}, 55%, 62%, 0.85)`;
-    ctx.lineWidth = isHover ? 2 : 1.3;
-    ctx.lineJoin = 'round';
-    ctx.stroke();
+    _drawMound(m, now, hover === m);
   }
 
   // labels
-  for (const m of _moundsCache.items) {
-    const bx = m.bbox.x * lineageScale + lineageOffX;
-    const bw = m.bbox.w * lineageScale;
+  for (const m of _moundsItems) {
+    const halfW = m.width / 2;
+    const bx = (m.cx - halfW) * lineageScale + lineageOffX;
+    const bw = m.width * lineageScale;
     if (bx + bw < -20 || bx > vw + 20) continue;
     const isHover = (hover === m);
     const labelX = m.cx * lineageScale + lineageOffX;
     const peakY = (m.baseY - m.height) * lineageScale + lineageOffY;
-    const labelY = peakY - 8;
-
+    const labelY = peakY - 10;
     if (isHover || (m.width * lineageScale > 80 && m.height * lineageScale > 70)) {
       ctx.fillStyle = isHover ? 'rgba(245,241,232,1)' : 'rgba(200,190,170,0.85)';
       ctx.font = isHover ? 'bold 11px JetBrains Mono' : '9px JetBrains Mono';
       ctx.textAlign = 'center';
-      const txt = m.table.length > 28 ? m.table.slice(0, 27) + '…' : m.table;
+      const txt = m.key.length > 28 ? m.key.slice(0, 27) + '…' : m.key;
       ctx.fillText(txt, labelX, labelY);
       if (isHover) {
         ctx.fillStyle = 'rgba(232,160,74,0.95)';
         ctx.font = '9px JetBrains Mono';
-        ctx.fillText(`${m.it.count.toLocaleString()} calls · ${fmtInterval(m.it.duration)}`, labelX, labelY - 14);
+        const meta = lineageMetric === 'count'
+          ? `${m.it.count.toLocaleString()} calls`
+          : `${fmtInterval(m.it.duration)}`;
+        ctx.fillText(meta, labelX, labelY - 14);
       }
     }
   }
 
-  lineageHover = hover ? { key: hover.table, count: hover.it.count, duration: hover.it.duration, ...hover.it } : null;
+  lineageHover = hover ? { key: hover.key, count: hover.it.count, duration: hover.it.duration, ...hover.it } : null;
   document.getElementById('tooltip').style.display = 'none';
   canvas.style.cursor = lineageDragging ? 'grabbing' : (hover ? 'pointer' : 'grab');
 }
@@ -2021,6 +2101,7 @@ function refreshHeader() {
     document.getElementById('bottom-controls').classList.remove('on');
     document.getElementById('stream-controls').classList.remove('on');
     document.getElementById('users-controls').classList.remove('on');
+    document.getElementById('lineage-controls').classList.remove('on');
     document.getElementById('search-box').classList.add('on');
     document.getElementById('hint').textContent = 'CLICK TO INSPECT';
   } else if (mainView === 'tables') {
@@ -2034,6 +2115,7 @@ function refreshHeader() {
     document.getElementById('bottom-controls').classList.add('on');
     document.getElementById('stream-controls').classList.remove('on');
     document.getElementById('users-controls').classList.remove('on');
+    document.getElementById('lineage-controls').classList.remove('on');
     document.getElementById('search-box').classList.add('on');
     document.getElementById('hint').textContent = 'CLICK TO INSPECT';
   } else if (mainView === 'stream') {
@@ -2044,6 +2126,7 @@ function refreshHeader() {
     document.getElementById('bottom-controls').classList.remove('on');
     document.getElementById('stream-controls').classList.add('on');
     document.getElementById('users-controls').classList.remove('on');
+    document.getElementById('lineage-controls').classList.remove('on');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = '';
   } else if (mainView === 'users') {
@@ -2054,16 +2137,18 @@ function refreshHeader() {
     document.getElementById('bottom-controls').classList.remove('on');
     document.getElementById('stream-controls').classList.remove('on');
     document.getElementById('users-controls').classList.add('on');
+    document.getElementById('lineage-controls').classList.remove('on');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = 'CLICK A RECT TO EXPLORE';
   } else if (mainView === 'lineage') {
     document.getElementById('title').textContent = 'Lineage';
     document.getElementById('title').classList.remove('ip-mode');
-    document.getElementById('subtitle').textContent = 'USAGE LINEAGE · TABLES BY TOTAL DURATION · CLICK FOR JOIN + ADJACENCY';
+    document.getElementById('subtitle').textContent = 'USAGE LINEAGE · MOUNDS BY TABLE · CLICK FOR JOIN + ADJACENCY';
     document.getElementById('stats').innerHTML = '';
     document.getElementById('bottom-controls').classList.remove('on');
     document.getElementById('stream-controls').classList.remove('on');
     document.getElementById('users-controls').classList.remove('on');
+    document.getElementById('lineage-controls').classList.toggle('on', lineageMode === 'treemap');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = 'CLICK A TABLE · ESC TO GO BACK';
   }
