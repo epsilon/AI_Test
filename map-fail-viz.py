@@ -40,6 +40,9 @@ except NameError: OUTPUT_HTML = "fail_interactive.html"  # 인터랙티브 HTML 
 try: MAX_INTERACTIVE_COLS
 except NameError: MAX_INTERACTIVE_COLS = None  # HTML에 포함할 최대 fail 칼럼 수 (None=전부)
 
+try: SKIP_TYPE_ROW
+except NameError: SKIP_TYPE_ROW = True         # CSV 2번째 줄이 데이터 타입 표시 행이면 True
+
 
 # === 코드 ===
 import re, json
@@ -81,14 +84,40 @@ def wafer_map(ax, xs, ys, values, title, vmax_log=None, point_size=None):
 
 
 # ---------- load ----------
-df = pd.read_csv(CSV_PATH, low_memory=False)
-print(f"rows: {len(df):,}   cols: {len(df.columns)}")
+# 헤더(1번째 줄) 다음의 데이터 타입 행(2번째 줄) 처리
+if SKIP_TYPE_ROW:
+    df = pd.read_csv(CSV_PATH, skiprows=[1], low_memory=False)
+    print(f"rows: {len(df):,}   cols: {len(df.columns)}  "
+          f"(skipped row 2 as type-annotation row)")
+else:
+    df = pd.read_csv(CSV_PATH, low_memory=False)
+    print(f"rows: {len(df):,}   cols: {len(df.columns)}")
+    # 안전망: 첫 데이터 행이 타입 표시처럼 보이면 자동 제거
+    _type_words = {"int", "str", "string", "float", "double", "number", "numeric",
+                   "object", "date", "datetime", "int64", "float64", "int32",
+                   "bool", "boolean", "integer", "text", "char", "varchar"}
+    if len(df) > 0:
+        _first = set(df.iloc[0].astype(str).str.lower().str.strip().unique())
+        _hits = _first & _type_words
+        if len(_hits) >= 2:
+            print(f"  type-annotation row auto-detected -> dropping (matched: {sorted(_hits)})")
+            df = df.iloc[1:].reset_index(drop=True)
 
 cmap = {c.lower(): c for c in df.columns}
 x_col = cmap["xdiepos"]
 y_col = cmap["ydiepos"]
 lot_col  = cmap.get("lotid")
 wseq_col = cmap.get("waferseq")
+
+# 좌표 강제 숫자 변환 + 비정상 행 제거
+for _c in (x_col, y_col):
+    df[_c] = pd.to_numeric(df[_c], errors="coerce")
+_before = len(df)
+df = df.dropna(subset=[x_col, y_col]).reset_index(drop=True)
+if len(df) < _before:
+    print(f"  dropped {_before - len(df)} rows with non-numeric coords")
+df[x_col] = df[x_col].astype(int)
+df[y_col] = df[y_col].astype(int)
 
 # fail 칼럼 = fail_cnt_total 뒤에 있는 모든 numeric 칼럼
 total_marker = None
@@ -99,14 +128,21 @@ for cand in ("fail_cnt_total", "failcnt_total", "fail_total"):
 
 if total_marker is not None:
     boundary = df.columns.get_loc(total_marker)
-    fail_cols = [c for c in df.columns[boundary + 1:]
+    candidate_cols = list(df.columns[boundary:])    # total_marker 포함
+    for _c in candidate_cols:
+        df[_c] = pd.to_numeric(df[_c], errors="coerce")
+    df[candidate_cols] = df[candidate_cols].fillna(0)
+    fail_cols = [c for c in candidate_cols[1:]
                  if pd.api.types.is_numeric_dtype(df[c])]
     print(f"'{total_marker}' at col {boundary} -> {len(fail_cols)} fail cols after it")
     has_total = True
 else:
     pat = re.compile(r"^fail", re.IGNORECASE)
-    fail_cols = [c for c in df.columns
-                 if pat.search(c) and pd.api.types.is_numeric_dtype(df[c])]
+    candidate_cols = [c for c in df.columns if pat.search(c)]
+    for _c in candidate_cols:
+        df[_c] = pd.to_numeric(df[_c], errors="coerce")
+    df[candidate_cols] = df[candidate_cols].fillna(0)
+    fail_cols = [c for c in candidate_cols if pd.api.types.is_numeric_dtype(df[c])]
     print(f"fail_cnt_total not found; regex fallback -> {len(fail_cols)} fail cols")
     has_total = False
 
