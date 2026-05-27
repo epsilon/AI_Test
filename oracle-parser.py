@@ -670,22 +670,32 @@ def _pairs_one(sql):
     return pairs
 
 df['join_pairs'] = df['sqls'].apply(lambda sqls: [p for s in (sqls or []) for p in _pairs_one(s)])
+print(f"join_pairs: {(df['join_pairs'].str.len() > 0).sum():,}")
 
-# --- UNION pairs ---
+# --- UNION pairs (safe version) ---
 def _union_one(sql):
     pairs = set()
     try: parsed = sqlglot.parse_one(sql, dialect='oracle')
     except: return list(pairs)
     for u in parsed.find_all(exp.Union):
-        lt = {(t.name or '').lower() for t in (u.left.find_all(exp.Table) if u.left else [])}
-        rt = {(t.name or '').lower() for t in (u.right.find_all(exp.Table) if u.right else [])}
-        for a in lt:
-            for b in rt:
-                if a and b and a != b:
+        selects = [c for c in (u.args.get('this'), u.args.get('expression'))
+                   if c is not None and hasattr(c, 'find_all')]
+        if len(selects) < 2:
+            all_t = sorted({(t.name or '').lower() for t in u.find_all(exp.Table) if t.name})
+            for i, a in enumerate(all_t):
+                for b in all_t[i+1:]:
+                    pairs.add((a, b))
+            continue
+        ts1 = {(t.name or '').lower() for t in selects[0].find_all(exp.Table) if t.name}
+        ts2 = {(t.name or '').lower() for t in selects[1].find_all(exp.Table) if t.name}
+        for a in ts1:
+            for b in ts2:
+                if a != b:
                     pairs.add(tuple(sorted([a, b])))
     return [list(p) for p in pairs]
 
 df['union_pairs'] = df['sqls'].apply(lambda sqls: [p for s in (sqls or []) for p in _union_one(s)])
+print(f"union_pairs: {(df['union_pairs'].str.len() > 0).sum():,}")
 
 # --- WHERE values ---
 WHERE_EQ = re.compile(r"(\w+)\s*=\s*'([^']{1,80})'", re.IGNORECASE)
@@ -703,8 +713,5 @@ def _where_vals(sqls):
     return {k: sorted(list(v))[:8] for k, v in out.items()}
 
 df['where_values'] = df['sqls'].apply(_where_vals)
-
+print(f"where_values: {(df['where_values'].str.len() > 0).sum():,}")
 print("done")
-print(f"join_pairs 있는 call: {(df['join_pairs'].str.len() > 0).sum():,}")
-print(f"union_pairs 있는 call: {(df['union_pairs'].str.len() > 0).sum():,}")
-print(f"where_values 있는 call: {(df['where_values'].str.len() > 0).sum():,}")
