@@ -328,8 +328,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="bottom-controls" id="users-controls" style="left: 28px;">
-  <button id="users-mapped" class="active">MAPPED USERS</button>
-  <button id="users-unmapped">UNMAPPED · BY TABLE</button>
+  <button data-mode="mapped_users" class="active">MAPPED · USERS</button>
+  <button data-mode="mapped_tables">MAPPED · TABLES</button>
+  <button data-mode="unmapped">UNMAPPED · TABLES</button>
 </div>
 
 <div class="tooltip" id="tooltip">
@@ -702,14 +703,29 @@ for (const speed of [100, 1000, 10000]) {
   });
 }
 
-// --- USERS view (treemap) ---
-let usersMode = 'mapped';  // 'mapped' | 'unmapped'
-let userRects = [];        // current visible treemap rects
+// --- USERS view (treemap with zoom/pan) ---
+let usersMode = 'mapped_users';  // 'mapped_users' | 'mapped_tables' | 'unmapped'
+let userRects = [];
 let _userHover = null;
+
+// zoom/pan state
+let usersScale = 1;
+let usersOffX = 0;
+let usersOffY = 0;
+function resetUsersZoom() {
+  usersScale = 1; usersOffX = 0; usersOffY = 0;
+}
+
+// drag-vs-click discrimination
+let usersDragging = false;
+let usersDragStartX = 0, usersDragStartY = 0;
+let usersDragOrigX = 0, usersDragOrigY = 0;
+let usersDragMoved = false;
 
 const mappedCalls = CALLS.filter(c => c.session_user_id);
 const unmappedCalls = CALLS.filter(c => !c.session_user_id);
 
+// mapped users
 const callsByUser = {};
 for (const c of mappedCalls) {
   const u = c.session_user_id;
@@ -719,6 +735,18 @@ const userItems = Object.entries(callsByUser)
   .map(([user, calls]) => ({ key: user, calls, value: calls.length }))
   .sort((a, b) => b.value - a.value);
 
+// mapped calls grouped by table
+const callsByMappedTable = {};
+for (const c of mappedCalls) {
+  for (const t of (c.tables || [])) {
+    (callsByMappedTable[t] = callsByMappedTable[t] || []).push(c);
+  }
+}
+const mappedTableItems = Object.entries(callsByMappedTable)
+  .map(([t, calls]) => ({ key: t, calls, value: calls.length }))
+  .sort((a, b) => b.value - a.value);
+
+// unmapped calls grouped by table
 const callsByUnmappedTable = {};
 for (const c of unmappedCalls) {
   for (const t of (c.tables || [])) {
@@ -728,6 +756,33 @@ for (const c of unmappedCalls) {
 const unmappedTableItems = Object.entries(callsByUnmappedTable)
   .map(([t, calls]) => ({ key: t, calls, value: calls.length }))
   .sort((a, b) => b.value - a.value);
+
+function currentUsersItems() {
+  if (usersMode === 'mapped_users') return userItems;
+  if (usersMode === 'mapped_tables') return mappedTableItems;
+  return unmappedTableItems;
+}
+function currentUsersHeaderText() {
+  if (usersMode === 'mapped_users') {
+    return [
+      `${userItems.length.toLocaleString()} mapped users`,
+      `${mappedCalls.length.toLocaleString()} of ${CALLS.length.toLocaleString()} calls mapped · scroll to zoom · drag to pan · ${(usersScale*100).toFixed(0)}%`
+    ];
+  }
+  if (usersMode === 'mapped_tables') {
+    return [
+      `${mappedTableItems.length.toLocaleString()} tables · mapped traffic`,
+      `${mappedCalls.length.toLocaleString()} mapped calls grouped by table · scroll to zoom · drag to pan · ${(usersScale*100).toFixed(0)}%`
+    ];
+  }
+  return [
+    `${unmappedTableItems.length.toLocaleString()} tables · unmapped traffic`,
+    `${unmappedCalls.length.toLocaleString()} unmapped calls grouped by table · scroll to zoom · drag to pan · ${(usersScale*100).toFixed(0)}%`
+  ];
+}
+function currentUsersLabelPrefix() {
+  return usersMode === 'mapped_users' ? 'USER ' : 'TABLE ';
+}
 
 // squarified treemap
 function squarify(items, rect) {
@@ -785,72 +840,75 @@ function squarify(items, rect) {
 }
 
 function renderUsersView() {
-  const items = usersMode === 'mapped' ? userItems : unmappedTableItems;
+  const items = currentUsersItems();
   const top = 160, bot = 90, side = 24;
   const rect = { x: side, y: top, w: vw - side*2, h: vh - top - bot };
 
   // header
+  const [hd1, hd2] = currentUsersHeaderText();
   ctx.save();
   ctx.fillStyle = 'rgba(245,241,232,0.85)';
   ctx.font = '300 36px Fraunces, serif';
   ctx.textAlign = 'center';
-  if (usersMode === 'mapped') {
-    ctx.fillText(`${items.length.toLocaleString()} mapped users`, vw/2, 88);
-    ctx.fillStyle = 'rgba(139,134,128,0.85)';
-    ctx.font = '10px JetBrains Mono';
-    ctx.fillText(`${mappedCalls.length.toLocaleString()} of ${CALLS.length.toLocaleString()} calls mapped via login function · rect size = call count`, vw/2, 112);
-  } else {
-    ctx.fillText(`${items.length.toLocaleString()} tables · unmapped traffic`, vw/2, 88);
-    ctx.fillStyle = 'rgba(139,134,128,0.85)';
-    ctx.font = '10px JetBrains Mono';
-    ctx.fillText(`${unmappedCalls.length.toLocaleString()} calls without user mapping · grouped by table`, vw/2, 112);
-  }
+  ctx.fillText(hd1, vw/2, 88);
+  ctx.fillStyle = 'rgba(139,134,128,0.85)';
+  ctx.font = '10px JetBrains Mono';
+  ctx.fillText(hd2, vw/2, 112);
   ctx.restore();
 
   if (!items.length) return;
 
-  // compute treemap
   userRects = squarify(items, rect);
 
-  // draw
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, top - 30, vw, vh);
+  ctx.clip();
+
   let hover = null;
   for (const r of userRects) {
     if (!r.rect || r.rect.w < 1 || r.rect.h < 1) continue;
+    const sx = r.rect.x * usersScale + usersOffX;
+    const sy = r.rect.y * usersScale + usersOffY;
+    const sw = r.rect.w * usersScale;
+    const sh = r.rect.h * usersScale;
+    if (sx + sw < 0 || sx > vw || sy + sh < 0 || sy > vh) continue;
+
     const hue = hashHue(r.key);
-    const isHover = mouseX >= r.rect.x && mouseX <= r.rect.x + r.rect.w
-                 && mouseY >= r.rect.y && mouseY <= r.rect.y + r.rect.h;
+    const isHover = mouseX >= sx && mouseX <= sx + sw && mouseY >= sy && mouseY <= sy + sh;
     if (isHover) hover = r;
 
     ctx.fillStyle = isHover
       ? `hsla(${hue}, 55%, 70%, 0.95)`
       : `hsla(${hue}, 45%, 50%, 0.75)`;
-    ctx.fillRect(r.rect.x, r.rect.y, r.rect.w, r.rect.h);
+    ctx.fillRect(sx, sy, sw, sh);
     ctx.strokeStyle = 'rgba(10,10,12,0.5)';
     ctx.lineWidth = 1;
-    ctx.strokeRect(r.rect.x, r.rect.y, r.rect.w, r.rect.h);
+    ctx.strokeRect(sx, sy, sw, sh);
 
-    // label if room
-    if (r.rect.w > 60 && r.rect.h > 24) {
-      ctx.fillStyle = 'rgba(10,10,12,0.85)';
+    if (sw > 50 && sh > 20) {
+      const labelSize = Math.max(10, Math.min(24, Math.sqrt(sw * sh) / 7));
+      ctx.fillStyle = 'rgba(10,10,12,0.9)';
       ctx.textAlign = 'left';
-      const labelSize = Math.max(10, Math.min(20, Math.sqrt(r.rect.w * r.rect.h) / 8));
       ctx.font = `${labelSize}px JetBrains Mono`;
-      const txt = r.key.length > Math.floor(r.rect.w / (labelSize * 0.55))
-        ? r.key.slice(0, Math.floor(r.rect.w / (labelSize * 0.55)) - 1) + '…'
+      const maxChars = Math.floor(sw / (labelSize * 0.6));
+      const txt = r.key.length > maxChars
+        ? r.key.slice(0, Math.max(1, maxChars - 1)) + '…'
         : r.key;
-      ctx.fillText(txt, r.rect.x + 8, r.rect.y + labelSize + 4);
-      // count
-      ctx.fillStyle = 'rgba(10,10,12,0.6)';
-      ctx.font = `${Math.max(9, labelSize * 0.6)}px JetBrains Mono`;
-      ctx.fillText(r.value.toLocaleString() + ' calls', r.rect.x + 8, r.rect.y + labelSize + 4 + labelSize * 0.7);
+      ctx.fillText(txt, sx + 8, sy + labelSize + 4);
+      if (sh > labelSize * 2.4) {
+        ctx.fillStyle = 'rgba(10,10,12,0.65)';
+        ctx.font = `${Math.max(9, labelSize * 0.55)}px JetBrains Mono`;
+        ctx.fillText(r.value.toLocaleString() + ' calls', sx + 8, sy + labelSize + 4 + labelSize * 0.75);
+      }
     }
   }
+  ctx.restore();
   _userHover = hover;
 
-  // tooltip
   const tt = document.getElementById('tooltip');
   if (hover) {
-    document.getElementById('tt-ip').textContent = (usersMode === 'mapped' ? 'USER ' : 'TABLE ') + hover.key;
+    document.getElementById('tt-ip').textContent = currentUsersLabelPrefix() + hover.key;
     const calls = hover.calls;
     const fns = new Set(calls.map(c => c.function));
     const ips = new Set(calls.map(c => c.ip));
@@ -860,10 +918,10 @@ function renderUsersView() {
     tt.style.display = 'block';
     tt.style.left = (mouseX + 14) + 'px';
     tt.style.top = (mouseY + 14) + 'px';
-    canvas.style.cursor = 'pointer';
+    canvas.style.cursor = usersDragging ? 'grabbing' : 'pointer';
   } else {
     tt.style.display = 'none';
-    canvas.style.cursor = 'crosshair';
+    canvas.style.cursor = usersDragging ? 'grabbing' : 'grab';
   }
 }
 
@@ -871,7 +929,7 @@ function openUserDetailPanel(r) {
   const pIp = document.getElementById('p-ip');
   const hue = hashHue(r.key);
   pIp.style.color = `hsl(${hue}, 55%, 65%)`;
-  pIp.textContent = (usersMode === 'mapped' ? 'USER ' : 'TABLE ') + r.key;
+  pIp.textContent = currentUsersLabelPrefix() + r.key;
 
   const calls = r.calls;
   const fns = {};
@@ -915,18 +973,54 @@ function openUserDetailPanel(r) {
   document.getElementById('panel').classList.add('open');
 }
 
-document.getElementById('users-mapped').addEventListener('click', () => {
-  usersMode = 'mapped';
-  document.getElementById('users-mapped').classList.add('active');
-  document.getElementById('users-unmapped').classList.remove('active');
-  closePanel();
+document.querySelectorAll('#users-controls button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    usersMode = btn.dataset.mode;
+    document.querySelectorAll('#users-controls button').forEach(b =>
+      b.classList.toggle('active', b === btn));
+    resetUsersZoom();
+    closePanel();
+  });
 });
-document.getElementById('users-unmapped').addEventListener('click', () => {
-  usersMode = 'unmapped';
-  document.getElementById('users-unmapped').classList.add('active');
-  document.getElementById('users-mapped').classList.remove('active');
-  closePanel();
+
+// wheel zoom (USERS view only)
+canvas.addEventListener('wheel', e => {
+  if (mainView !== 'users') return;
+  e.preventDefault();
+  const factor = e.deltaY > 0 ? 0.88 : 1.13;
+  const newScale = Math.max(0.4, Math.min(40, usersScale * factor));
+  if (newScale === usersScale) return;
+  // zoom around mouse pointer
+  const wx = (e.clientX - usersOffX) / usersScale;
+  const wy = (e.clientY - usersOffY) / usersScale;
+  usersScale = newScale;
+  usersOffX = e.clientX - wx * usersScale;
+  usersOffY = e.clientY - wy * usersScale;
+}, { passive: false });
+
+// drag pan
+canvas.addEventListener('mousedown', e => {
+  if (mainView !== 'users') return;
+  usersDragging = true;
+  usersDragStartX = e.clientX;
+  usersDragStartY = e.clientY;
+  usersDragOrigX = usersOffX;
+  usersDragOrigY = usersOffY;
+  usersDragMoved = false;
 });
+canvas.addEventListener('mousemove', e => {
+  if (usersDragging) {
+    const dx = e.clientX - usersDragStartX;
+    const dy = e.clientY - usersDragStartY;
+    if (!usersDragMoved && Math.hypot(dx, dy) > 4) usersDragMoved = true;
+    if (usersDragMoved) {
+      usersOffX = usersDragOrigX + dx;
+      usersOffY = usersDragOrigY + dy;
+    }
+  }
+});
+canvas.addEventListener('mouseup', () => { usersDragging = false; });
+canvas.addEventListener('mouseleave', () => { usersDragging = false; });
 
 // --- EDGES ---
 // JOIN edges: tables that appear in the same call (same SQL flow)
@@ -1037,6 +1131,7 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
         streamReset();
       }
     }
+    if (mainView === 'users') resetUsersZoom();
     refreshHeader();
     closePanel();
     searchInput.value = ''; filterQuery = ''; recomputeVisibleTables();
@@ -1430,6 +1525,7 @@ canvas.addEventListener('click', e => {
     return;
   }
   if (mainView === 'users') {
+    if (usersDragMoved) { usersDragMoved = false; return; }
     if (_userHover) openUserDetailPanel(_userHover);
     return;
   }
