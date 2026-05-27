@@ -1283,23 +1283,30 @@ function _drawGroup(g, hoverBoxOut) {
   const c = g.call;
   const tables = c.tables || [];
 
+  // group container — wrap tables in a function box
+  ctx.fillStyle = g.isSelected ? 'rgba(232, 160, 74, 0.06)' : 'rgba(245, 241, 232, 0.02)';
+  ctx.fillRect(g.x, g.y, g.w, g.h);
+  ctx.strokeStyle = g.isSelected ? 'rgba(232, 160, 74, 0.55)' : 'rgba(139, 134, 128, 0.35)';
+  ctx.lineWidth = g.isSelected ? 1.5 : 1;
+  ctx.strokeRect(g.x, g.y, g.w, g.h);
+
   // function name + cache (group header)
-  ctx.fillStyle = 'rgba(245,241,232,0.95)';
+  ctx.fillStyle = g.isSelected ? 'rgba(232, 160, 74, 1)' : 'rgba(245,241,232,0.92)';
   ctx.font = 'bold 11px JetBrains Mono';
   ctx.textAlign = 'left';
   const fn = shortFn(c.function || '');
   const headerTxt = fn + (g.isSelected ? '  ←' : '');
-  const maxHeader = Math.floor((g.w - 80) / 7);
+  const maxHeader = Math.floor((g.w - 90) / 7);
   const shownFn = headerTxt.length > maxHeader ? headerTxt.slice(0, maxHeader-1) + '…' : headerTxt;
-  ctx.fillText(shownFn, g.x + 4, g.y + 12);
+  ctx.fillText(shownFn, g.x + 8, g.y + 15);
 
   // cache badge
   if (c.cache) {
     const cacheTxt = c.cache === 'hit' ? 'CACHE HIT' : c.cache === 'miss' ? 'CACHE MISS' : 'CACHE';
     ctx.font = 'bold 8px JetBrains Mono';
     const cw = ctx.measureText(cacheTxt).width + 8;
-    const cx = g.x + g.w - cw - 2;
-    const cy = g.y + 2;
+    const cx = g.x + g.w - cw - 6;
+    const cy = g.y + 5;
     const cacheColor = c.cache === 'hit' ? 'rgba(232, 160, 74, 0.85)' : c.cache === 'miss' ? 'rgba(94, 192, 192, 0.85)' : 'rgba(160,160,160,0.7)';
     ctx.fillStyle = cacheColor;
     ctx.fillRect(cx, cy, cw, 13);
@@ -1311,22 +1318,21 @@ function _drawGroup(g, hoverBoxOut) {
   if (!tables.length) return [];
 
   // table layout — horizontal, with gap for relation labels
-  const tableH = 30;
-  const minTableW = 80;
-  const maxTableW = 130;
-  const relGap = 70;  // space between tables for relation label
+  const tableH = 36;
+  const minTableW = 90;
+  const maxTableW = 150;
+  const relGap = 75;
   
-  // figure size
-  const n = Math.min(tables.length, 4);  // cap at 4 per group
+  const n = Math.min(tables.length, 4);
   const shownTables = tables.slice(0, n);
-  const availW = g.w - 8;
+  const availW = g.w - 16;
   const idealTotal = n * maxTableW + (n-1) * relGap;
   let tableW;
   if (idealTotal <= availW) tableW = maxTableW;
   else tableW = Math.max(minTableW, (availW - (n-1) * relGap) / n);
   const totalW = n * tableW + (n-1) * relGap;
   const startX = g.x + (g.w - totalW) / 2;
-  const tableY = g.y + 24;
+  const tableY = g.y + 28;
 
   // relations between visible table pairs
   const visibleIdx = new Map();
@@ -1402,12 +1408,13 @@ function _drawGroup(g, hoverBoxOut) {
       ctx.strokeRect(tx, ty, tableW, tableH);
     }
 
-    ctx.fillStyle = 'rgba(10,10,12,0.95)';
-    ctx.font = isSelected ? 'bold 10px JetBrains Mono' : '10px JetBrains Mono';
+    ctx.fillStyle = 'rgba(10,10,12,1)';
+    ctx.font = isSelected ? 'bold 13px JetBrains Mono' : '10px JetBrains Mono';
     ctx.textAlign = 'center';
-    const maxLen = Math.floor((tableW - 8) / 6);
+    const charW = isSelected ? 7.5 : 6;
+    const maxLen = Math.floor((tableW - 10) / charW);
     const shownT = t.length > maxLen ? t.slice(0, maxLen-1) + '…' : t;
-    ctx.fillText(shownT, tx + tableW/2, ty + tableH/2 + 4);
+    ctx.fillText(shownT, tx + tableW/2, ty + tableH/2 + (isSelected ? 5 : 4));
 
     hits.push({ table: t, rect: { x: tx, y: ty, w: tableW, h: tableH } });
   }
