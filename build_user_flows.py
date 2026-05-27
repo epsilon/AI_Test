@@ -195,10 +195,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     font-size: 14px; font-weight: 400; margin-right: 4px;
   }
   .close-btn {
-    position: absolute; top: 20px; right: 20px;
-    background: transparent; border: 1px solid var(--line);
-    color: var(--text); width: 28px; height: 28px;
-    cursor: pointer; font-size: 14px; line-height: 1; font-family: inherit;
+    position: absolute; top: 16px; right: 16px;
+    background: var(--bg); border: 1px solid var(--line);
+    color: var(--text); width: 40px; height: 40px;
+    cursor: pointer; font-size: 18px; line-height: 1; font-family: inherit;
+    z-index: 100;
   }
   .close-btn:hover { border-color: var(--amber); color: var(--amber); }
 
@@ -313,7 +314,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="panel" id="panel">
-  <button class="close-btn" id="close-btn" onclick="closePanel();return false;">×</button>
+  <button class="close-btn" id="close-btn" type="button">×</button>
   <div class="panel-head">
     <div class="ip-big" id="p-ip"></div>
     <div class="ctx-line" id="p-ctx"></div>
@@ -1144,26 +1145,18 @@ function fillCallDetail(detail, c) {
 
 function closePanel() { document.getElementById('panel').classList.remove('open'); }
 window.closePanel = closePanel;
-// triple-bind close button to be safe across environments
-(function bindClose() {
-  const btn = document.getElementById('close-btn');
-  if (!btn) return;
-  btn.onclick = function(e) {
-    if (e) { e.preventDefault(); e.stopPropagation(); }
-    closePanel();
-    return false;
-  };
-  btn.addEventListener('click', e => {
-    e.preventDefault(); e.stopPropagation();
-    closePanel();
-  }, true);
-  btn.addEventListener('touchend', e => {
-    e.preventDefault(); e.stopPropagation();
-    closePanel();
-  }, true);
-})();
-// stop clicks inside panel from leaking to canvas
-document.getElementById('panel').addEventListener('click', e => e.stopPropagation());
+// simple, direct binding
+const _closeBtn = document.getElementById('close-btn');
+_closeBtn.addEventListener('click', function(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  closePanel();
+});
+_closeBtn.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  closePanel();
+}, { passive: false });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('panel').classList.contains('open')) closePanel();
