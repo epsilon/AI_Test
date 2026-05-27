@@ -447,6 +447,7 @@ window.addEventListener('resize', resize);
 resize();
 computeDomainCenters();
 window.addEventListener('resize', computeDomainCenters);
+window.addEventListener('resize', () => { _moundsCache = null; });
 
 // view state
 let mainView = 'ips';            // 'ips' | 'tables'
@@ -1231,6 +1232,177 @@ let lineageDragStartX = 0, lineageDragStartY = 0;
 let lineageDragOrigX = 0, lineageDragOrigY = 0;
 let lineageDragMoved = false;
 
+function _mulberry32(seed) {
+  return function() {
+    seed |= 0;
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = seed;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+let _moundsCache = null;
+let _moundsCacheVw = 0, _moundsCacheVh = 0;
+
+function _computeMounds() {
+  const items = lineageTableItems;
+  const n = items.length;
+  if (!n) { _moundsCache = { items: [] }; return; }
+
+  const sideMargin = 40;
+  const baseY = vh - 60;
+  const topReserved = 140;
+  const maxHeight = baseY - topReserved - 20;
+
+  // mound widths ∝ sqrt(count), normalized to fit
+  const sqrts = items.map(it => Math.sqrt(it.count));
+  const sumSqrt = sqrts.reduce((a, b) => a + b, 0);
+  const availW = vw - sideMargin * 2;
+  const widths = sqrts.map(s => Math.max(28, (s / sumSqrt) * availW));
+  const totalW = widths.reduce((a, b) => a + b, 0);
+  const widthScale = totalW > availW ? availW / totalW : 1;
+  const adjWidths = widths.map(w => w * widthScale);
+
+  const maxCount = Math.max(...items.map(it => it.count));
+
+  const result = [];
+  let cx = sideMargin;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const w = adjWidths[i];
+    const moundCx = cx + w / 2;
+    const spread = w * 0.45;
+
+    // height proportional to sqrt(count)
+    const heightFrac = Math.sqrt(it.count / maxCount);
+    const height = 30 + heightFrac * maxHeight;
+
+    // dot count: cap but scale with sqrt
+    const nDots = Math.min(800, Math.max(8, Math.floor(Math.sqrt(it.count) * 4)));
+
+    // seed by table name for stable layout
+    let seed = 0;
+    for (const ch of it.key) seed = (seed * 31 + ch.charCodeAt(0)) & 0xFFFFFFFF;
+    const rng = _mulberry32(seed || 1);
+
+    const points = [];
+    let minX = Infinity, maxX = -Infinity, minY = Infinity;
+    for (let j = 0; j < nDots; j++) {
+      // box-muller gaussian
+      let u1 = rng(), u2 = rng();
+      if (u1 < 0.0001) u1 = 0.0001;
+      const g1 = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+      let u3 = rng(), u4 = rng();
+      if (u3 < 0.0001) u3 = 0.0001;
+      const g2 = Math.sqrt(-2 * Math.log(u3)) * Math.cos(2 * Math.PI * u4);
+
+      // y: only upward, peaked at base
+      const dy = Math.abs(g1) * height * 0.45;
+      // x: gaussian spread, narrows as height increases
+      const heightRatio = 1 - dy / (height * 0.6);
+      const dx = g2 * spread * 0.5 * Math.max(0.2, heightRatio);
+
+      const x = moundCx + dx;
+      const y = baseY - dy;
+      points.push({ x, y });
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+    }
+
+    result.push({
+      table: it.key, it, cx: moundCx, baseY,
+      width: w, height,
+      points,
+      bbox: { x: minX, y: minY - 4, w: maxX - minX, h: baseY - minY + 8 },
+    });
+    cx += w;
+  }
+  _moundsCache = { items: result };
+  _moundsCacheVw = vw;
+  _moundsCacheVh = vh;
+}
+
+function renderLineageMounds() {
+  if (!_moundsCache || _moundsCacheVw !== vw || _moundsCacheVh !== vh) _computeMounds();
+
+  // header
+  ctx.save();
+  ctx.fillStyle = 'rgba(245,241,232,0.85)';
+  ctx.font = '300 36px Fraunces, serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${lineageTableItems.length.toLocaleString()} tables · usage lineage`, vw/2, 88);
+  ctx.fillStyle = 'rgba(139,134,128,0.85)';
+  ctx.font = '10px JetBrains Mono';
+  ctx.fillText(`each mound = one table · height ∝ √call count · click for lineage · scroll/drag · ${(lineageScale*100).toFixed(0)}%`, vw/2, 112);
+  ctx.restore();
+
+  // baseline
+  const baseScreenY = (vh - 60) * lineageScale + lineageOffY;
+  ctx.strokeStyle = 'rgba(139,134,128,0.25)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, baseScreenY);
+  ctx.lineTo(vw, baseScreenY);
+  ctx.stroke();
+
+  let hover = null;
+  // hover detection first
+  for (const m of _moundsCache.items) {
+    const bx = m.bbox.x * lineageScale + lineageOffX;
+    const by = m.bbox.y * lineageScale + lineageOffY;
+    const bw = m.bbox.w * lineageScale;
+    const bh = m.bbox.h * lineageScale;
+    if (mouseX >= bx && mouseX <= bx + bw && mouseY >= by && mouseY <= by + bh) {
+      hover = m;
+    }
+  }
+
+  // draw mounds
+  for (const m of _moundsCache.items) {
+    const hue = hashHue(m.table);
+    const isHover = (hover === m);
+    const dotSize = Math.max(0.8, 2 * lineageScale);
+    ctx.fillStyle = isHover ? `hsla(${hue}, 70%, 65%, 0.95)` : `hsla(${hue}, 50%, 55%, 0.65)`;
+    for (const p of m.points) {
+      const px = p.x * lineageScale + lineageOffX;
+      const py = p.y * lineageScale + lineageOffY;
+      if (px < -4 || px > vw + 4 || py < -4 || py > vh + 4) continue;
+      ctx.beginPath();
+      ctx.arc(px, py, dotSize, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // labels — always visible above larger mounds, on hover for all
+  for (const m of _moundsCache.items) {
+    const isHover = (hover === m);
+    const labelX = m.cx * lineageScale + lineageOffX;
+    const peakY = m.bbox.y * lineageScale + lineageOffY;
+    const labelY = peakY - 8;
+    if (isHover || (m.width * lineageScale > 60 && m.height * lineageScale > 50)) {
+      ctx.fillStyle = isHover ? 'rgba(245,241,232,1)' : 'rgba(180,170,150,0.85)';
+      ctx.font = isHover ? 'bold 11px JetBrains Mono' : '9px JetBrains Mono';
+      ctx.textAlign = 'center';
+      const txt = m.table.length > 24 ? m.table.slice(0, 23) + '…' : m.table;
+      ctx.fillText(txt, labelX, labelY);
+      if (isHover) {
+        ctx.fillStyle = 'rgba(232,160,74,0.95)';
+        ctx.font = '9px JetBrains Mono';
+        ctx.fillText(`${m.it.count.toLocaleString()} calls · ${fmtInterval(m.it.duration)}`, labelX, labelY - 14);
+      }
+    }
+  }
+
+  lineageHover = hover ? { key: hover.table, count: hover.it.count, duration: hover.it.duration, ...hover.it } : null;
+
+  // tooltip — keep clean; labels above mound do the job
+  document.getElementById('tooltip').style.display = 'none';
+  canvas.style.cursor = lineageDragging ? 'grabbing' : (hover ? 'pointer' : 'grab');
+}
+
 function renderLineageTreemap() {
   const top = 160, bot = 90, side = 24;
   const rect = { x: side, y: top, w: vw - side*2, h: vh - top - bot };
@@ -1651,7 +1823,7 @@ function renderLineageDetail() {
 }
 
 function renderLineageView() {
-  if (lineageMode === 'treemap') renderLineageTreemap();
+  if (lineageMode === 'treemap') renderLineageMounds();
   else renderLineageDetail();
 }
 
