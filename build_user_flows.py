@@ -134,18 +134,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .search-box::before { content: '⌕ '; color: var(--text-dim); font-size: 10px; }
 
-  .gather-btn {
+  .bottom-controls {
     position: fixed; bottom: 60px; left: 268px; z-index: 5;
+    display: none; gap: 8px;
+  }
+  .bottom-controls.on { display: flex; }
+  .bottom-controls button {
     background: var(--bg-2); border: 1px solid var(--line);
     color: var(--text); font-family: inherit;
     font-size: 10px; letter-spacing: 0.2em;
     padding: 9px 14px; cursor: pointer;
-    display: none;
     transition: border-color 0.2s, color 0.2s;
   }
-  .gather-btn.on { display: block; }
-  .gather-btn:hover { border-color: var(--amber); color: var(--amber); }
-  .gather-btn.active { color: var(--amber); border-color: var(--amber); background: rgba(232,160,74,0.08); }
+  .bottom-controls button:hover { border-color: var(--amber); color: var(--amber); }
+  .bottom-controls button.active { color: var(--amber); border-color: var(--amber); background: rgba(232,160,74,0.08); }
 
   .tooltip {
     position: fixed; z-index: 7; background: var(--bg-2);
@@ -300,7 +302,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <input type="text" id="search" placeholder="filter..." autocomplete="off">
 </div>
 
-<button class="gather-btn" id="gather-btn" onclick="toggleGather()">GATHER BY DOMAIN</button>
+<div class="bottom-controls" id="bottom-controls">
+  <button id="gather-btn">GATHER BY DOMAIN</button>
+  <button id="edges-btn">SHOW LINKS</button>
+</div>
 
 <div class="tooltip" id="tooltip">
   <div class="ip" id="tt-ip"></div>
@@ -308,7 +313,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="panel" id="panel">
-  <button class="close-btn" id="close-btn">×</button>
+  <button class="close-btn" id="close-btn" onclick="closePanel();return false;">×</button>
   <div class="panel-head">
     <div class="ip-big" id="p-ip"></div>
     <div class="ctx-line" id="p-ctx"></div>
@@ -439,12 +444,13 @@ const tableParticles = tableList.map(d => {
 
 // gather state
 let clustered = false;
+let showEdges = false;
+
 function toggleGather() {
   clustered = !clustered;
   const btn = document.getElementById('gather-btn');
   btn.classList.toggle('active', clustered);
   btn.textContent = clustered ? 'SCATTER' : 'GATHER BY DOMAIN';
-  // give an impulse on scatter so particles spread out instead of slowly drifting
   if (!clustered) {
     for (const p of tableParticles) {
       const angle = Math.random() * Math.PI * 2;
@@ -454,6 +460,16 @@ function toggleGather() {
     }
   }
 }
+function toggleEdges() {
+  showEdges = !showEdges;
+  const btn = document.getElementById('edges-btn');
+  btn.classList.toggle('active', showEdges);
+  btn.textContent = showEdges ? 'HIDE LINKS' : 'SHOW LINKS';
+}
+window.toggleGather = toggleGather;
+window.toggleEdges = toggleEdges;
+document.getElementById('gather-btn').addEventListener('click', toggleGather);
+document.getElementById('edges-btn').addEventListener('click', toggleEdges);
 
 // --- EDGES ---
 // JOIN edges: tables that appear in the same call (same SQL flow)
@@ -539,7 +555,7 @@ function refreshHeader() {
       <span class="n">${ipList.length}</span>IPs &nbsp;·&nbsp;
       <span class="n">${CALLS.length.toLocaleString()}</span>CALLS`;
     document.getElementById('search').placeholder = 'filter by ip...';
-    document.getElementById('gather-btn').classList.remove('on');
+    document.getElementById('bottom-controls').classList.remove('on');
   } else {
     document.getElementById('title').textContent = 'Table Flows';
     document.getElementById('title').classList.remove('ip-mode');
@@ -548,7 +564,7 @@ function refreshHeader() {
       <span class="n">${tableList.length}</span>TABLES &nbsp;·&nbsp;
       <span class="n">${CALLS.length.toLocaleString()}</span>CALLS`;
     document.getElementById('search').placeholder = 'filter by table...';
-    document.getElementById('gather-btn').classList.add('on');
+    document.getElementById('bottom-controls').classList.add('on');
   }
   document.getElementById('legend').classList.remove('on');
   document.getElementById('search-box').classList.add('on');
@@ -594,9 +610,9 @@ function renderIpParticles() {
 
 // --- TABLE PARTICLES ---
 function renderTableParticles() {
-  // edges + domain labels — only when clustered
-  if (clustered) {
-    // session edges (sky blue) drawn first, under join edges
+  // edges — controlled by SHOW LINKS button (independent of gather)
+  if (showEdges) {
+    // session edges (sky blue) first
     ctx.lineWidth = 1;
     for (const k of Object.keys(sessionEdges)) {
       const [a, b] = k.split('__');
@@ -625,8 +641,10 @@ function renderTableParticles() {
       ctx.stroke();
     }
     ctx.lineWidth = 1;
+  }
 
-    // domain labels
+  // domain labels — only when clustered
+  if (clustered) {
     ctx.save();
     ctx.font = '600 11px JetBrains Mono';
     ctx.fillStyle = 'rgba(245,241,232,0.4)';
@@ -897,7 +915,7 @@ function selectIP(ip) {
   document.getElementById('legend').classList.add('on');
   document.getElementById('search-box').classList.remove('on');
   document.getElementById('view-toggle').classList.add('hidden');
-  document.getElementById('gather-btn').classList.remove('on');
+  document.getElementById('bottom-controls').classList.remove('on');
   document.getElementById('hint').textContent = 'CLICK BAR FOR SQL';
   closePanel();
 }
@@ -1089,10 +1107,27 @@ function fillCallDetail(detail, c) {
 }
 
 function closePanel() { document.getElementById('panel').classList.remove('open'); }
-document.getElementById('close-btn').addEventListener('click', e => {
-  e.stopPropagation();
-  closePanel();
-});
+window.closePanel = closePanel;
+// triple-bind close button to be safe across environments
+(function bindClose() {
+  const btn = document.getElementById('close-btn');
+  if (!btn) return;
+  btn.onclick = function(e) {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    closePanel();
+    return false;
+  };
+  btn.addEventListener('click', e => {
+    e.preventDefault(); e.stopPropagation();
+    closePanel();
+  }, true);
+  btn.addEventListener('touchend', e => {
+    e.preventDefault(); e.stopPropagation();
+    closePanel();
+  }, true);
+})();
+// stop clicks inside panel from leaking to canvas
+document.getElementById('panel').addEventListener('click', e => e.stopPropagation());
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('panel').classList.contains('open')) closePanel();
