@@ -579,3 +579,59 @@ if unmatched_examples:
     print("\n매칭 실패 샘플:")
     for ex in unmatched_examples:
         print(f"  {ex}")
+
+# join추출 진단
+# 1) sqls 자체가 있나?
+print(f"sqls 있는 call: {(df['sqls'].str.len() > 0).sum():,} / {len(df):,}")
+
+# 2) JOIN 키워드 포함 SQL 있나?
+def has_join(sqls):
+    for s in (sqls or []):
+        if 'JOIN' in s.upper(): return True
+    return False
+print(f"'JOIN' 키워드 SQL 있는 call: {df['sqls'].apply(has_join).sum():,}")
+
+# 3) FROM a, b 옛 oracle 스타일?
+def has_comma_from(sqls):
+    for s in (sqls or []):
+        up = s.upper()
+        if 'FROM' in up:
+            from_part = up.split('FROM',1)[1].split('WHERE')[0] if 'WHERE' in up else up.split('FROM',1)[1]
+            if ',' in from_part: return True
+    return False
+print(f"FROM a, b 스타일 call: {df['sqls'].apply(has_comma_from).sum():,}")
+
+# 4) JOIN 있는 SQL 샘플 + sqlglot 파싱 결과
+import sqlglot
+from sqlglot import exp
+
+test = []
+for _, row in df.iterrows():
+    for sql in (row['sqls'] or []):
+        if 'JOIN' in sql.upper() or has_comma_from([sql]):
+            test.append(sql)
+            if len(test) >= 3: break
+    if len(test) >= 3: break
+
+for i, sql in enumerate(test):
+    print(f"\n=== SQL {i+1} ===")
+    print(sql[:500])
+    try:
+        p = sqlglot.parse_one(sql, dialect='oracle')
+        print(f"\nTables found: {[(t.name, t.alias_or_name) for t in p.find_all(exp.Table)]}")
+        print(f"Join nodes: {len(list(p.find_all(exp.Join)))}")
+        for j in p.find_all(exp.Join):
+            on = j.args.get('on')
+            print(f"  ON expr: {on}")
+            if on:
+                for eq in on.find_all(exp.EQ):
+                    print(f"    EQ: left={eq.left} (table='{eq.left.table if hasattr(eq.left,'table') else '?'}'), right={eq.right} (table='{eq.right.table if hasattr(eq.right,'table') else '?'}')")
+        # WHERE의 EQ도
+        w = p.args.get('where')
+        if w:
+            for eq in w.find_all(exp.EQ):
+                lt, rt = eq.left, eq.right
+                if isinstance(lt, exp.Column) and isinstance(rt, exp.Column):
+                    print(f"  WHERE EQ: {lt}={rt} (tables: {lt.table}, {rt.table})")
+    except Exception as e:
+        print(f"파싱 실패: {e}")
