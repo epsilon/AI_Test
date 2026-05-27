@@ -289,6 +289,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button data-view="tables">BY TABLE</button>
   <button data-view="stream">STREAM</button>
   <button data-view="users">USERS</button>
+  <button data-view="lineage">LINEAGE</button>
 </div>
 
 <div class="hint" id="hint">CLICK TO INSPECT</div>
@@ -1075,30 +1076,401 @@ document.querySelectorAll('#users-controls button[data-metric]').forEach(btn => 
   });
 });
 
-// wheel zoom (USERS view only)
+// --- LINEAGE view ---
+const lineageJoins = {};       // {table: {otherTable: {keys: Set, count}}}
+const lineageNext = {};        // {table: {otherTable: count}}
+const lineagePrev = {};
+const lineageWhereValues = {}; // {table: {column: Set}}
+
+for (const c of CALLS) {
+  for (const pair of (c.join_pairs || [])) {
+    const [ta, ka, tb, kb] = pair;
+    if (!ta || !tb) continue;
+    if (!lineageJoins[ta]) lineageJoins[ta] = {};
+    if (!lineageJoins[ta][tb]) lineageJoins[ta][tb] = { keys: new Set(), count: 0 };
+    lineageJoins[ta][tb].keys.add(`${ka} = ${kb}`);
+    lineageJoins[ta][tb].count++;
+    if (!lineageJoins[tb]) lineageJoins[tb] = {};
+    if (!lineageJoins[tb][ta]) lineageJoins[tb][ta] = { keys: new Set(), count: 0 };
+    lineageJoins[tb][ta].keys.add(`${kb} = ${ka}`);
+    lineageJoins[tb][ta].count++;
+  }
+  if (c.where_values) {
+    for (const t of (c.tables || [])) {
+      if (!lineageWhereValues[t]) lineageWhereValues[t] = {};
+      for (const [col, vals] of Object.entries(c.where_values)) {
+        if (!lineageWhereValues[t][col]) lineageWhereValues[t][col] = new Set();
+        for (const v of vals) lineageWhereValues[t][col].add(v);
+      }
+    }
+  }
+}
+
+// session adjacency
+{
+  const portCalls = {};
+  for (const c of CALLS) {
+    const k = `${c.ip}:${c.port}`;
+    (portCalls[k] = portCalls[k] || []).push(c);
+  }
+  for (const k of Object.keys(portCalls)) {
+    const arr = portCalls[k].sort((a, b) => (a._start || 0) - (b._start || 0));
+    for (let i = 0; i < arr.length - 1; i++) {
+      const ta = arr[i].tables || [];
+      const tb = arr[i+1].tables || [];
+      for (const a of ta) {
+        for (const b of tb) {
+          if (a === b) continue;
+          if (!lineageNext[a]) lineageNext[a] = {};
+          lineageNext[a][b] = (lineageNext[a][b] || 0) + 1;
+          if (!lineagePrev[b]) lineagePrev[b] = {};
+          lineagePrev[b][a] = (lineagePrev[b][a] || 0) + 1;
+        }
+      }
+    }
+  }
+}
+
+// all tables, mapping-agnostic, sorted by duration
+const lineageTableItems = [];
+{
+  const tableCalls = {};
+  for (const c of CALLS) {
+    for (const t of (c.tables || [])) {
+      (tableCalls[t] = tableCalls[t] || []).push(c);
+    }
+  }
+  for (const [t, calls] of Object.entries(tableCalls)) {
+    lineageTableItems.push({
+      key: t, calls,
+      count: calls.length,
+      duration: calls.reduce((s, c) => s + (c.duration_ms || 0), 0),
+      functions: _functionsOf(calls),
+      value: 0,
+    });
+  }
+  lineageTableItems.sort((a, b) => b.duration - a.duration);
+  lineageTableItems.forEach(it => it.value = it.duration);
+}
+
+let lineageMode = 'treemap';   // 'treemap' | 'detail'
+let lineageSelected = null;
+let lineageRects = [];
+let lineageHover = null;
+let lineageDetailHover = null;
+let lineageDetailBoxes = [];
+
+let lineageScale = 1, lineageOffX = 0, lineageOffY = 0;
+function resetLineageZoom() { lineageScale = 1; lineageOffX = 0; lineageOffY = 0; }
+let lineageDragging = false;
+let lineageDragStartX = 0, lineageDragStartY = 0;
+let lineageDragOrigX = 0, lineageDragOrigY = 0;
+let lineageDragMoved = false;
+
+function renderLineageTreemap() {
+  const top = 160, bot = 90, side = 24;
+  const rect = { x: side, y: top, w: vw - side*2, h: vh - top - bot };
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(245,241,232,0.85)';
+  ctx.font = '300 36px Fraunces, serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${lineageTableItems.length.toLocaleString()} tables · usage lineage`, vw/2, 88);
+  ctx.fillStyle = 'rgba(139,134,128,0.85)';
+  ctx.font = '10px JetBrains Mono';
+  const totalDur = lineageTableItems.reduce((s, it) => s + it.duration, 0);
+  ctx.fillText(`${fmtInterval(totalDur)} total · sorted by duration · click a table for lineage · scroll to zoom · ${(lineageScale*100).toFixed(0)}%`, vw/2, 112);
+  ctx.restore();
+
+  if (!lineageTableItems.length) return;
+  lineageRects = squarify(lineageTableItems, rect);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, top - 30, vw, vh);
+  ctx.clip();
+
+  let hover = null;
+  for (const r of lineageRects) {
+    if (!r.rect || r.rect.w < 1 || r.rect.h < 1) continue;
+    const sx = r.rect.x * lineageScale + lineageOffX;
+    const sy = r.rect.y * lineageScale + lineageOffY;
+    const sw = r.rect.w * lineageScale;
+    const sh = r.rect.h * lineageScale;
+    if (sx + sw < 0 || sx > vw || sy + sh < 0 || sy > vh) continue;
+
+    const hue = hashHue(r.key);
+    const isHover = mouseX >= sx && mouseX <= sx + sw && mouseY >= sy && mouseY <= sy + sh;
+    if (isHover) hover = r;
+
+    ctx.fillStyle = isHover ? `hsla(${hue}, 55%, 70%, 0.95)` : `hsla(${hue}, 45%, 50%, 0.75)`;
+    ctx.fillRect(sx, sy, sw, sh);
+    ctx.strokeStyle = 'rgba(10,10,12,0.5)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(sx, sy, sw, sh);
+
+    if (sw > 50 && sh > 20) {
+      const labelSize = Math.max(10, Math.min(24, Math.sqrt(sw * sh) / 7));
+      ctx.fillStyle = 'rgba(10,10,12,0.9)';
+      ctx.textAlign = 'left';
+      ctx.font = `${labelSize}px JetBrains Mono`;
+      const maxChars = Math.floor(sw / (labelSize * 0.6));
+      const txt = r.key.length > maxChars ? r.key.slice(0, Math.max(1, maxChars-1)) + '…' : r.key;
+      ctx.fillText(txt, sx + 8, sy + labelSize + 4);
+      if (sh > labelSize * 2.4) {
+        ctx.fillStyle = 'rgba(10,10,12,0.65)';
+        ctx.font = `${Math.max(9, labelSize * 0.55)}px JetBrains Mono`;
+        ctx.fillText(fmtInterval(r.duration) + ' · ' + r.count + ' calls', sx + 8, sy + labelSize + 4 + labelSize * 0.75);
+      }
+    }
+  }
+  ctx.restore();
+  lineageHover = hover;
+
+  const tt = document.getElementById('tooltip');
+  if (hover) {
+    document.getElementById('tt-ip').textContent = 'TABLE ' + hover.key;
+    document.getElementById('tt-meta').textContent =
+      `${hover.count.toLocaleString()} calls · ${fmtInterval(hover.duration)} · click for lineage`;
+    document.getElementById('tt-meta').style.whiteSpace = 'nowrap';
+    tt.style.display = 'block';
+    tt.style.left = (mouseX + 14) + 'px';
+    tt.style.top = (mouseY + 14) + 'px';
+    canvas.style.cursor = lineageDragging ? 'grabbing' : 'pointer';
+  } else {
+    tt.style.display = 'none';
+    canvas.style.cursor = lineageDragging ? 'grabbing' : 'grab';
+  }
+}
+
+function layoutLineageDetail() {
+  const W = vw, H = vh;
+  const cx = W / 2, cy = H / 2 + 20;
+  const centerW = 240, centerH = 84;
+  const center = { x: cx - centerW/2, y: cy - centerH/2, w: centerW, h: centerH, table: lineageSelected, type: 'center' };
+
+  const joins = lineageJoins[lineageSelected] || {};
+  const joinEntries = Object.entries(joins).sort((a, b) => b[1].count - a[1].count);
+  const topJoins = joinEntries.filter((_, i) => i % 2 === 0).slice(0, 5);
+  const botJoins = joinEntries.filter((_, i) => i % 2 === 1).slice(0, 5);
+
+  const joinW = 160, joinH = 58, joinGap = 22;
+  const layoutRow = (joins, y, type) => {
+    if (!joins.length) return [];
+    const totalW = joins.length * joinW + (joins.length - 1) * joinGap;
+    const startX = (W - totalW) / 2;
+    return joins.map(([t, info], i) => ({
+      x: startX + i * (joinW + joinGap), y, w: joinW, h: joinH,
+      table: t, keys: [...info.keys].slice(0, 3), count: info.count, type,
+    }));
+  };
+  const top = layoutRow(topJoins, cy - 230, 'join_top');
+  const bot = layoutRow(botJoins, cy + 170, 'join_bot');
+
+  const prevs = lineagePrev[lineageSelected] || {};
+  const nexts = lineageNext[lineageSelected] || {};
+  const prevEntries = Object.entries(prevs).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const nextEntries = Object.entries(nexts).sort((a, b) => b[1] - a[1]).slice(0, 4);
+
+  const sideW = 150, sideH = 42, sideGap = 12;
+  const sideLayout = (entries, x, type) => {
+    if (!entries.length) return [];
+    const totalH = entries.length * sideH + (entries.length - 1) * sideGap;
+    const startY = cy - totalH / 2;
+    return entries.map(([t, count], i) => ({
+      x, y: startY + i * (sideH + sideGap), w: sideW, h: sideH,
+      table: t, count, type,
+    }));
+  };
+  const prev = sideLayout(prevEntries, 30, 'prev');
+  const next = sideLayout(nextEntries, W - sideW - 30, 'next');
+
+  return { center, top, bot, prev, next };
+}
+
+function renderLineageDetail() {
+  if (!lineageSelected) return;
+  const layout = layoutLineageDetail();
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(245,241,232,0.85)';
+  ctx.font = '300 28px Fraunces, serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Lineage of ' + lineageSelected, vw/2, 64);
+  ctx.fillStyle = 'rgba(139,134,128,0.85)';
+  ctx.font = '10px JetBrains Mono';
+  ctx.fillText('JOIN — vertical (red) · session adjacent — horizontal (blue) · click any box to navigate · ESC to back', vw/2, 84);
+  ctx.restore();
+
+  // JOIN connection lines + key labels
+  ctx.lineWidth = 1.5;
+  for (const b of [...layout.top, ...layout.bot]) {
+    const fromX = layout.center.x + layout.center.w / 2;
+    const fromY = b.type === 'join_top' ? layout.center.y : layout.center.y + layout.center.h;
+    const toX = b.x + b.w / 2;
+    const toY = b.type === 'join_top' ? b.y + b.h : b.y;
+    ctx.strokeStyle = 'rgba(217, 96, 96, 0.55)';
+    ctx.beginPath();
+    ctx.moveTo(fromX, fromY);
+    ctx.bezierCurveTo(fromX, (fromY+toY)/2, toX, (fromY+toY)/2, toX, toY);
+    ctx.stroke();
+
+    if (b.keys && b.keys.length) {
+      ctx.font = '10px JetBrains Mono';
+      ctx.textAlign = 'center';
+      const midX = (fromX + toX) / 2;
+      const midY = (fromY + toY) / 2;
+      const labelMaxW = Math.max(...b.keys.map(s => ctx.measureText(s).width));
+      const lineH = 13;
+      const bgH = b.keys.length * lineH + 8;
+      ctx.fillStyle = 'rgba(15,12,10,0.92)';
+      ctx.fillRect(midX - labelMaxW/2 - 6, midY - bgH/2, labelMaxW + 12, bgH);
+      ctx.strokeStyle = 'rgba(217, 96, 96, 0.55)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(midX - labelMaxW/2 - 6, midY - bgH/2, labelMaxW + 12, bgH);
+      ctx.fillStyle = 'rgba(232, 180, 140, 0.95)';
+      b.keys.forEach((k, i) => {
+        ctx.fillText(k, midX, midY - bgH/2 + lineH * (i+1) - 1);
+      });
+    }
+  }
+  ctx.textAlign = 'left';
+
+  // PREV/NEXT lines
+  for (const b of [...layout.prev, ...layout.next]) {
+    const isPrev = b.type === 'prev';
+    const fromX = isPrev ? b.x + b.w : layout.center.x + layout.center.w;
+    const fromY = b.y + b.h / 2;
+    const toX = isPrev ? layout.center.x : b.x;
+    const toY = layout.center.y + layout.center.h / 2;
+
+    ctx.strokeStyle = 'rgba(135, 206, 250, 0.55)';
+    ctx.beginPath();
+    if (isPrev) { ctx.moveTo(fromX, fromY); ctx.lineTo(toX, toY); }
+    else { ctx.moveTo(fromX, toY); ctx.lineTo(toX, fromY); }
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(135, 206, 250, 0.9)';
+    ctx.font = '9px JetBrains Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${b.count}×`, (fromX + toX)/2, (fromY + toY)/2 - 4);
+    ctx.textAlign = 'left';
+  }
+
+  // boxes
+  const allBoxes = [layout.center, ...layout.top, ...layout.bot, ...layout.prev, ...layout.next];
+  lineageDetailBoxes = allBoxes;
+  let detailHover = null;
+  for (const b of allBoxes) {
+    const hue = hashHue(b.table);
+    const isCenter = b.type === 'center';
+    const isHover = !isCenter && mouseX >= b.x && mouseX <= b.x + b.w && mouseY >= b.y && mouseY <= b.y + b.h;
+    if (isHover) detailHover = b;
+
+    ctx.fillStyle = isCenter
+      ? `hsla(${hue}, 60%, 65%, 0.95)`
+      : (isHover ? `hsla(${hue}, 55%, 70%, 0.95)` : `hsla(${hue}, 45%, 50%, 0.85)`);
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = isCenter ? 'rgba(245,241,232,0.7)' : 'rgba(10,10,12,0.6)';
+    ctx.lineWidth = isCenter ? 2 : 1;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+
+    ctx.fillStyle = 'rgba(10,10,12,0.95)';
+    ctx.font = isCenter ? 'bold 14px JetBrains Mono' : '11px JetBrains Mono';
+    let txt = b.table;
+    const charW = isCenter ? 8.5 : 7;
+    const maxLen = Math.floor((b.w - 16) / charW);
+    if (txt.length > maxLen) txt = txt.slice(0, maxLen - 1) + '…';
+    ctx.fillText(txt, b.x + 8, b.y + (isCenter ? 26 : 22));
+
+    if (b.count != null) {
+      ctx.fillStyle = 'rgba(10,10,12,0.7)';
+      ctx.font = '9px JetBrains Mono';
+      const lbl = isCenter ? '' : (b.type.startsWith('join') ? b.count + ' joins' : b.count + '× adjacent');
+      if (lbl) ctx.fillText(lbl, b.x + 8, b.y + 36);
+    }
+    if (isCenter) {
+      const it = lineageTableItems.find(it => it.key === lineageSelected);
+      if (it) {
+        ctx.fillStyle = 'rgba(10,10,12,0.7)';
+        ctx.font = '9px JetBrains Mono';
+        ctx.fillText(it.count + ' calls · ' + fmtInterval(it.duration), b.x + 8, b.y + 46);
+      }
+    }
+  }
+  lineageDetailHover = detailHover;
+
+  // WHERE values
+  const wv = lineageWhereValues[lineageSelected];
+  if (wv && Object.keys(wv).length) {
+    const wvX = 30, wvY = 130;
+    ctx.fillStyle = 'rgba(245,241,232,0.8)';
+    ctx.font = '11px JetBrains Mono';
+    ctx.textAlign = 'left';
+    ctx.fillText('WHERE values seen on this table:', wvX, wvY);
+    ctx.fillStyle = 'rgba(180,170,150,0.85)';
+    ctx.font = '10px JetBrains Mono';
+    let y = wvY + 18;
+    const entries = Object.entries(wv).slice(0, 8);
+    for (const [col, vals] of entries) {
+      const valArr = [...vals].slice(0, 5);
+      const txt = `  ${col} = ${valArr.map(v => `'${v}'`).join(', ')}`;
+      const maxChars = 90;
+      const shown = txt.length > maxChars ? txt.slice(0, maxChars-1) + '…' : txt;
+      ctx.fillText(shown, wvX, y);
+      y += 15;
+    }
+    if (Object.keys(wv).length > 8) {
+      ctx.fillStyle = 'rgba(139,134,128,0.6)';
+      ctx.fillText(`  + ${Object.keys(wv).length - 8} more columns`, wvX, y);
+    }
+  }
+
+  canvas.style.cursor = detailHover ? 'pointer' : 'default';
+  document.getElementById('tooltip').style.display = 'none';
+}
+
+function renderLineageView() {
+  if (lineageMode === 'treemap') renderLineageTreemap();
+  else renderLineageDetail();
+}
+
 canvas.addEventListener('wheel', e => {
-  if (mainView !== 'users') return;
-  e.preventDefault();
-  const factor = e.deltaY > 0 ? 0.88 : 1.13;
-  const newScale = Math.max(0.4, Math.min(40, usersScale * factor));
-  if (newScale === usersScale) return;
-  // zoom around mouse pointer
-  const wx = (e.clientX - usersOffX) / usersScale;
-  const wy = (e.clientY - usersOffY) / usersScale;
-  usersScale = newScale;
-  usersOffX = e.clientX - wx * usersScale;
-  usersOffY = e.clientY - wy * usersScale;
+  if (mainView === 'users') {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 0.88 : 1.13;
+    const newScale = Math.max(0.4, Math.min(40, usersScale * factor));
+    if (newScale === usersScale) return;
+    const wx = (e.clientX - usersOffX) / usersScale;
+    const wy = (e.clientY - usersOffY) / usersScale;
+    usersScale = newScale;
+    usersOffX = e.clientX - wx * usersScale;
+    usersOffY = e.clientY - wy * usersScale;
+  } else if (mainView === 'lineage' && lineageMode === 'treemap') {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 0.88 : 1.13;
+    const newScale = Math.max(0.4, Math.min(40, lineageScale * factor));
+    if (newScale === lineageScale) return;
+    const wx = (e.clientX - lineageOffX) / lineageScale;
+    const wy = (e.clientY - lineageOffY) / lineageScale;
+    lineageScale = newScale;
+    lineageOffX = e.clientX - wx * lineageScale;
+    lineageOffY = e.clientY - wy * lineageScale;
+  }
 }, { passive: false });
 
-// drag pan
 canvas.addEventListener('mousedown', e => {
-  if (mainView !== 'users') return;
-  usersDragging = true;
-  usersDragStartX = e.clientX;
-  usersDragStartY = e.clientY;
-  usersDragOrigX = usersOffX;
-  usersDragOrigY = usersOffY;
-  usersDragMoved = false;
+  if (mainView === 'users') {
+    usersDragging = true;
+    usersDragStartX = e.clientX; usersDragStartY = e.clientY;
+    usersDragOrigX = usersOffX; usersDragOrigY = usersOffY;
+    usersDragMoved = false;
+  } else if (mainView === 'lineage' && lineageMode === 'treemap') {
+    lineageDragging = true;
+    lineageDragStartX = e.clientX; lineageDragStartY = e.clientY;
+    lineageDragOrigX = lineageOffX; lineageDragOrigY = lineageOffY;
+    lineageDragMoved = false;
+  }
 });
 canvas.addEventListener('mousemove', e => {
   if (usersDragging) {
@@ -1110,9 +1482,18 @@ canvas.addEventListener('mousemove', e => {
       usersOffY = usersDragOrigY + dy;
     }
   }
+  if (lineageDragging) {
+    const dx = e.clientX - lineageDragStartX;
+    const dy = e.clientY - lineageDragStartY;
+    if (!lineageDragMoved && Math.hypot(dx, dy) > 4) lineageDragMoved = true;
+    if (lineageDragMoved) {
+      lineageOffX = lineageDragOrigX + dx;
+      lineageOffY = lineageDragOrigY + dy;
+    }
+  }
 });
-canvas.addEventListener('mouseup', () => { usersDragging = false; });
-canvas.addEventListener('mouseleave', () => { usersDragging = false; });
+canvas.addEventListener('mouseup', () => { usersDragging = false; lineageDragging = false; });
+canvas.addEventListener('mouseleave', () => { usersDragging = false; lineageDragging = false; });
 
 // --- EDGES ---
 // JOIN edges: tables that appear in the same call (same SQL flow)
@@ -1208,6 +1589,16 @@ function tableInView(name) {
 let mouseX = -100, mouseY = -100;
 canvas.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
 
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (mainView === 'lineage' && lineageMode === 'detail') {
+      lineageMode = 'treemap';
+      lineageSelected = null;
+      return;
+    }
+  }
+});
+
 // --- TOGGLE ---
 document.querySelectorAll('.view-toggle button').forEach(btn => {
   btn.onclick = () => {
@@ -1224,6 +1615,11 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
       }
     }
     if (mainView === 'users') resetUsersZoom();
+    if (mainView === 'lineage') {
+      lineageMode = 'treemap';
+      lineageSelected = null;
+      resetLineageZoom();
+    }
     refreshHeader();
     closePanel();
     searchInput.value = ''; filterQuery = ''; recomputeVisibleTables();
@@ -1278,6 +1674,16 @@ function refreshHeader() {
     document.getElementById('users-controls').classList.add('on');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = 'CLICK A RECT TO EXPLORE';
+  } else if (mainView === 'lineage') {
+    document.getElementById('title').textContent = 'Lineage';
+    document.getElementById('title').classList.remove('ip-mode');
+    document.getElementById('subtitle').textContent = 'USAGE LINEAGE · TABLES BY TOTAL DURATION · CLICK FOR JOIN + ADJACENCY';
+    document.getElementById('stats').innerHTML = '';
+    document.getElementById('bottom-controls').classList.remove('on');
+    document.getElementById('stream-controls').classList.remove('on');
+    document.getElementById('users-controls').classList.remove('on');
+    document.getElementById('search-box').classList.remove('on');
+    document.getElementById('hint').textContent = 'CLICK A TABLE · ESC TO GO BACK';
   }
   document.getElementById('legend').classList.remove('on');
   document.getElementById('back-btn').classList.remove('on');
@@ -1604,6 +2010,7 @@ function loop() {
     renderStream();
   }
   else if (mainView === 'users') renderUsersView();
+  else if (mainView === 'lineage') renderLineageView();
   else if (mainView === 'ips') renderIpParticles();
   else renderTableParticles();
   requestAnimationFrame(loop);
@@ -1619,6 +2026,20 @@ canvas.addEventListener('click', e => {
   if (mainView === 'users') {
     if (usersDragMoved) { usersDragMoved = false; return; }
     if (_userHover) openUserDetailPanel(_userHover);
+    return;
+  }
+  if (mainView === 'lineage') {
+    if (lineageMode === 'treemap') {
+      if (lineageDragMoved) { lineageDragMoved = false; return; }
+      if (lineageHover) {
+        lineageSelected = lineageHover.key;
+        lineageMode = 'detail';
+      }
+    } else {
+      if (lineageDetailHover) {
+        lineageSelected = lineageDetailHover.table;
+      }
+    }
     return;
   }
   const hovered = canvas._hover;
@@ -1894,6 +2315,8 @@ def build_user_flows(df: pd.DataFrame, out_path: str = 'user_flows.html'):
             'sqls': list(row.get('sqls') or []),
             'tables': list(row.get('tables') or []),
             'session_user_id': row.get('session_user_id') if pd.notna(row.get('session_user_id')) else None,
+            'join_pairs': list(row.get('join_pairs') or []),
+            'where_values': dict(row.get('where_values') or {}),
         })
 
     # pre-compute global time range here (much faster than in JS)
