@@ -641,9 +641,10 @@ import sqlglot
 from sqlglot import exp
 import re
 
-# --- JOIN pairs ---
+# --- JOIN pairs (전체 try/except로 보호) ---
 def _aliases(parsed):
     a = {}
+    if not hasattr(parsed, 'find_all'): return a
     for t in parsed.find_all(exp.Table):
         nm = (t.name or '').lower()
         al = (t.alias_or_name or '').lower()
@@ -653,45 +654,55 @@ def _aliases(parsed):
 
 def _pairs_one(sql):
     pairs = []
-    try: parsed = sqlglot.parse_one(sql, dialect='oracle')
-    except: return pairs
-    al = _aliases(parsed)
-    def collect(node):
-        if node is None: return
-        for eq in node.find_all(exp.EQ):
-            lt, rt = eq.left, eq.right
-            if isinstance(lt, exp.Column) and isinstance(rt, exp.Column):
-                ta = al.get((lt.table or '').lower(), (lt.table or '').lower())
-                tb = al.get((rt.table or '').lower(), (rt.table or '').lower())
-                if ta and tb and ta != tb:
-                    pairs.append((ta, lt.name.lower(), tb, rt.name.lower()))
-    for j in parsed.find_all(exp.Join): collect(j.args.get('on'))
-    collect(parsed.args.get('where'))
+    try:
+        parsed = sqlglot.parse_one(sql, dialect='oracle')
+        if not hasattr(parsed, 'find_all'): return pairs
+        al = _aliases(parsed)
+        def collect(node):
+            if not hasattr(node, 'find_all'): return
+            for eq in node.find_all(exp.EQ):
+                lt, rt = eq.left, eq.right
+                if isinstance(lt, exp.Column) and isinstance(rt, exp.Column):
+                    ta = al.get((lt.table or '').lower(), (lt.table or '').lower())
+                    tb = al.get((rt.table or '').lower(), (rt.table or '').lower())
+                    if ta and tb and ta != tb:
+                        pairs.append((ta, lt.name.lower(), tb, rt.name.lower()))
+        for j in parsed.find_all(exp.Join):
+            collect(j.args.get('on'))
+        collect(parsed.args.get('where'))
+    except Exception:
+        pass
     return pairs
 
 df['join_pairs'] = df['sqls'].apply(lambda sqls: [p for s in (sqls or []) for p in _pairs_one(s)])
 print(f"join_pairs: {(df['join_pairs'].str.len() > 0).sum():,}")
 
-# --- UNION pairs (safe version) ---
+# --- UNION pairs ---
 def _union_one(sql):
     pairs = set()
-    try: parsed = sqlglot.parse_one(sql, dialect='oracle')
-    except: return list(pairs)
-    for u in parsed.find_all(exp.Union):
-        selects = [c for c in (u.args.get('this'), u.args.get('expression'))
-                   if c is not None and hasattr(c, 'find_all')]
-        if len(selects) < 2:
-            all_t = sorted({(t.name or '').lower() for t in u.find_all(exp.Table) if t.name})
-            for i, a in enumerate(all_t):
-                for b in all_t[i+1:]:
-                    pairs.add((a, b))
-            continue
-        ts1 = {(t.name or '').lower() for t in selects[0].find_all(exp.Table) if t.name}
-        ts2 = {(t.name or '').lower() for t in selects[1].find_all(exp.Table) if t.name}
-        for a in ts1:
-            for b in ts2:
-                if a != b:
-                    pairs.add(tuple(sorted([a, b])))
+    try:
+        parsed = sqlglot.parse_one(sql, dialect='oracle')
+        if not hasattr(parsed, 'find_all'): return list(pairs)
+        for u in parsed.find_all(exp.Union):
+            selects = []
+            for key in ('this', 'expression'):
+                c = u.args.get(key)
+                if c is not None and hasattr(c, 'find_all'):
+                    selects.append(c)
+            if len(selects) < 2:
+                all_t = sorted({(t.name or '').lower() for t in u.find_all(exp.Table) if t.name})
+                for i, a in enumerate(all_t):
+                    for b in all_t[i+1:]:
+                        pairs.add((a, b))
+                continue
+            ts1 = {(t.name or '').lower() for t in selects[0].find_all(exp.Table) if t.name}
+            ts2 = {(t.name or '').lower() for t in selects[1].find_all(exp.Table) if t.name}
+            for a in ts1:
+                for b in ts2:
+                    if a != b:
+                        pairs.add(tuple(sorted([a, b])))
+    except Exception:
+        pass
     return [list(p) for p in pairs]
 
 df['union_pairs'] = df['sqls'].apply(lambda sqls: [p for s in (sqls or []) for p in _union_one(s)])
