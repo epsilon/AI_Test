@@ -1,30 +1,28 @@
 """
-map_fail_viz.py — multi-CSV die fail map visualizer
-단일 HTML 리포트로 출력. 여러 CSV 읽어서 type별로 집계·비교 가능.
+map_fail_viz.py — multi-CSV die fail map visualizer with workbench
 
-사용법 (Jupyter 셀에서):
-    CSV_PATHS = ["wafer_01.csv", "wafer_02.csv", ...]   # 여러 개 가능
-    # 또는 단일: CSV_PATH = "data.csv"
-    TYPE_COL  = "item"        # 'item' / 'temp' 등 그룹화 기준 (있으면 자동 감지)
-    # 이 파일 내용 붙여넣고 실행
+위 셀에서:
+    CSV_PATHS = ["w1.csv", "w2.csv", ...]   # 또는 CSV_PATH = "data.csv"
+    # 그다음 셀에 이 파일 내용 붙여넣고 실행
 
-출력: OUTPUT_HTML (기본 'fail_report.html') 단일 파일
-    1. Overview wafer map (전체 합산)
-    2. Pareto chart
+출력 OUTPUT_HTML (기본 'fail_report.html') 한 파일에 다음이 들어감:
+    1. Overview wafer map (모든 데이터 합산)
+    2. Pareto
     3. Per-group small multiples
-    4. Interactive explorer (type/group/column 드롭다운, Plotly)
+    4. **Workbench** — 라이브러리에서 wafer 를 드래그/클릭으로 가져와
+       워크벤치에 올리면 합쳐서 보여줌. SUM / MEAN / MAX 선택 가능.
+
+wafer 한 개의 정체는 (LOTID, waferseq, item, temp) 조합으로 정의됨
+(없는 칼럼은 자동으로 생략, 다 없으면 파일명으로 폴백).
 """
 
-# === CONFIG — 위 셀에서 미리 정의했으면 그 값 사용 ===
+# === CONFIG ===
 try: CSV_PATHS
 except NameError:
     try: CSV_PATHS = [CSV_PATH]
     except NameError: CSV_PATHS = ["your_data.csv"]
 if not isinstance(CSV_PATHS, (list, tuple)):
     CSV_PATHS = [CSV_PATHS]
-
-try: TYPE_COL
-except NameError: TYPE_COL = "item"          # 'item' 또는 'temp' 등
 
 try: WAFER_FILTER
 except NameError: WAFER_FILTER = None
@@ -52,11 +50,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use("Agg")               # 인라인 표시 안 함 — 전부 HTML 에 박음
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-# === helpers ===
 def parse_group(col):
     s = col.lower()
     s = re.sub(r"^fail_?(cn|cnt)?_?", "", s)
@@ -93,8 +90,7 @@ dfs = []
 for path in CSV_PATHS:
     p = Path(path)
     if not p.exists():
-        print(f"  WARN: not found, skipping: {p}")
-        continue
+        print(f"  WARN: not found: {p}"); continue
     if SKIP_TYPE_ROW:
         d = pd.read_csv(p, skiprows=[1], low_memory=False)
     else:
@@ -105,7 +101,6 @@ for path in CSV_PATHS:
 
 assert dfs, "no CSV files read"
 
-# 첫 CSV의 칼럼 순서를 표준으로
 ref_cols = list(dfs[0].columns)
 df = pd.concat(dfs, ignore_index=True, sort=False)
 ordered = [c for c in ref_cols if c in df.columns] + \
@@ -114,19 +109,15 @@ df = df[ordered]
 print(f"combined: {len(df):,} rows × {len(df.columns)} cols")
 
 
-# === detect cols ===
+# === detect columns ===
 cmap = {c.lower(): c for c in df.columns}
 x_col   = cmap["xdiepos"]
 y_col   = cmap["ydiepos"]
 lot_col  = cmap.get("lotid")
 wseq_col = cmap.get("waferseq")
-type_col = cmap.get(TYPE_COL.lower())
-if type_col:
-    print(f"  type column: '{type_col}'")
-else:
-    print(f"  '{TYPE_COL}' column not found — type filtering disabled")
+item_col = cmap.get("item")
+temp_col = cmap.get("temp")
 
-# 좌표 강제 숫자화
 for _c in (x_col, y_col):
     df[_c] = pd.to_numeric(df[_c], errors="coerce")
 _before = len(df)
@@ -137,12 +128,11 @@ df[x_col] = df[x_col].astype(int)
 df[y_col] = df[y_col].astype(int)
 
 
-# === detect fail cols (fail_cnt_total 뒤) ===
+# === detect fail cols ===
 total_marker = None
 for cand in ("fail_cnt_total", "failcnt_total", "fail_total"):
     if cand in cmap:
-        total_marker = cmap[cand]
-        break
+        total_marker = cmap[cand]; break
 
 if total_marker is not None:
     boundary = list(df.columns).index(total_marker)
@@ -161,7 +151,6 @@ else:
     df[candidate_cols] = df[candidate_cols].fillna(0)
     fail_cols = [c for c in candidate_cols if pd.api.types.is_numeric_dtype(df[c])]
     print(f"fail_cnt_total not found; regex fallback -> {len(fail_cols)} fail cols")
-
 assert fail_cols, "no fail columns detected"
 
 
@@ -185,40 +174,56 @@ print("groups:", ", ".join(
 ))
 
 
-# === canonical positions (union across all rows) ===
+# === canonical positions ===
 positions = (df[[x_col, y_col]].drop_duplicates()
              .sort_values([y_col, x_col]).reset_index(drop=True))
 xs_full = positions[x_col].values
 ys_full = positions[y_col].values
 n_pos = len(positions)
 print(f"  unique die positions: {n_pos:,}")
+pos_idx = pd.MultiIndex.from_arrays([xs_full, ys_full], names=[x_col, y_col])
 
 
-# === aggregate per type ===
 def aggregate(sub):
     g = sub.groupby([x_col, y_col])[fail_cols].sum()
-    g = g.reindex(pd.MultiIndex.from_arrays(
-        [xs_full, ys_full], names=[x_col, y_col])).fillna(0)
-    return g
-
-type_values = []
-sources = [("__ALL__", df)]
-if type_col:
-    type_values = sorted(df[type_col].astype(str).dropna().unique().tolist())
-    type_values = [t for t in type_values if t and t.lower() != "nan"]
-    sources += [(t, df[df[type_col].astype(str) == t]) for t in type_values]
-
-print(f"aggregating across {len(sources)} type bucket(s): "
-      f"{[name for name, _ in sources]}")
-agg_dfs = {}
-for name, sub in sources:
-    if len(sub) == 0:
-        continue
-    agg_dfs[name] = aggregate(sub)
+    return g.reindex(pos_idx).fillna(0)
 
 
-# === static plots (use __ALL__) ===
-g_all = agg_dfs["__ALL__"]
+# === per-wafer aggregation (workbench source units) ===
+# wafer 정체 = (LOTID, waferseq, item, temp) 중 존재하는 것들의 조합
+entity_cols = [c for c in [lot_col, wseq_col, item_col, temp_col] if c]
+if not entity_cols:
+    entity_cols = ["__source__"]
+print(f"  wafer entity keys: {entity_cols}")
+
+wafers = {}
+g_all = aggregate(df)   # 전체 합산 (static plot 용)
+
+for keys, sub in df.groupby(entity_cols, dropna=False, sort=True):
+    if not isinstance(keys, tuple):
+        keys = (keys,)
+    wid = f"w{len(wafers):04d}"
+    label_parts = []
+    for kcol, kval in zip(entity_cols, keys):
+        if pd.isna(kval):
+            s = "?"
+        else:
+            s = str(kval)
+        if kcol == wseq_col:
+            s = f"W{s}"
+        elif kcol == temp_col:
+            s = f"{s}\u00b0"
+        label_parts.append(s)
+    label = " · ".join(label_parts)
+    wafers[wid] = {
+        "label": label,
+        "n_rows": len(sub),
+        "agg": aggregate(sub),
+    }
+print(f"  enumerated {len(wafers)} wafer entries")
+
+
+# === static plots using overall aggregate ===
 plot_b64 = {}
 group_plots = []
 
@@ -249,8 +254,7 @@ for g_name, items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
     n_all = len(cols_in_group)
     plotted = cols_in_group[:TOP_PER_GROUP]
     n = len(plotted)
-    if n == 0:
-        continue
+    if n == 0: continue
     ncols = min(6, max(3, int(np.ceil(np.sqrt(n)))))
     nrows = (n + ncols - 1) // ncols
     gmax = float(g_all[plotted].to_numpy().max() or 1)
@@ -272,45 +276,45 @@ for g_name, items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
     group_plots.append((g_name, n_all, fig_to_b64(fig)))
 
 
-# === interactive data ===
+# === build workbench JSON ===
 if MAX_INTERACTIVE_COLS is not None and len(fail_cols) > MAX_INTERACTIVE_COLS:
     selected_cols = list(totals.head(MAX_INTERACTIVE_COLS).index)
-    print(f"  interactive: top {len(selected_cols)} / {len(fail_cols)} cols")
+    print(f"  workbench: top {len(selected_cols)} / {len(fail_cols)} cols")
 else:
     selected_cols = fail_cols
-    print(f"  interactive: all {len(selected_cols)} cols included")
+    print(f"  workbench: all {len(selected_cols)} cols included")
 
-agg_data = {}
-for name, g in agg_dfs.items():
-    d = {c: np.round(np.log1p(g[c].values.astype(float)), 2).tolist()
-         for c in selected_cols}
-    d["__TOTAL__"] = np.round(np.log1p(g.sum(axis=1).values.astype(float)), 2).tolist()
-    agg_data[name] = d
+# 각 wafer 의 각 col 에 대해 원본 값(정수에 가까운 fail count) 저장 — JS 에서 합산
+def encode_arr(arr):
+    return [int(v) if v == int(v) else round(float(v), 2)
+            for v in np.nan_to_num(arr, nan=0.0)]
+
+print("encoding wafer arrays...")
+wafers_json = {}
+for wid, w in wafers.items():
+    g = w["agg"]
+    data = {c: encode_arr(g[c].values) for c in selected_cols}
+    data["__TOTAL__"] = encode_arr(g.sum(axis=1).values)
+    wafers_json[wid] = {
+        "label": w["label"],
+        "nRows": int(w["n_rows"]),
+        "data": data,
+    }
 
 group_options_interactive = {}
 for c in selected_cols:
     g, _ = parse_group(c)
     group_options_interactive.setdefault(g, []).append(c)
 
-vmax_global = 0.0
-for d in agg_data.values():
-    for arr in d.values():
-        if arr:
-            m = max(arr)
-            if m > vmax_global:
-                vmax_global = m
-
 
 # === build HTML ===
 print("building HTML...")
 
 js_data = {
-    "AGG": agg_data,
+    "WAFERS": wafers_json,
     "XS": [int(v) for v in xs_full],
     "YS": [int(v) for v in ys_full],
     "GROUPS": group_options_interactive,
-    "TYPES": ["__ALL__"] + type_values,
-    "VMAX": float(vmax_global),
     "PSIZE": max(4, POINT_SIZE // 2),
 }
 
@@ -318,97 +322,166 @@ sources_str = ", ".join(Path(p).name for p in CSV_PATHS)
 meta_html = (
     f"files ({len(CSV_PATHS)}): {sources_str}<br>"
     f"rows: {len(df):,} &middot; "
-    f"unique die positions: {n_pos:,} &middot; "
+    f"die positions: {n_pos:,} &middot; "
     f"fail cols: {len(fail_cols)} &middot; "
     f"groups: {len(groups)} &middot; "
-    f"types: {len(type_values) if type_values else 'n/a'}"
+    f"wafers: {len(wafers)}"
 )
 
-html_parts = ["""<!doctype html>
+html = ["""<!doctype html>
 <html><head><meta charset="utf-8">
 <title>Fail Map Report</title>
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
 <style>
   body{font-family:system-ui,-apple-system,sans-serif;background:#0c1118;color:#e6edf3;
-       margin:0;padding:24px;max-width:1400px;margin-left:auto;margin-right:auto}
+       margin:0;padding:24px;max-width:1500px;margin-left:auto;margin-right:auto}
   h1{color:#ffb000;font-size:20px;border-bottom:1px solid #2c3645;padding-bottom:10px;
      letter-spacing:.05em}
-  h2{color:#ffb000;font-size:13px;margin-top:36px;letter-spacing:.05em;
-     text-transform:uppercase}
+  h2{color:#ffb000;font-size:13px;margin-top:36px;letter-spacing:.05em;text-transform:uppercase}
   h3{color:#8b949e;font-size:12px;margin-top:24px;font-weight:500}
   .meta{color:#8b949e;font-size:12px;font-family:ui-monospace,SFMono-Regular,monospace;
         margin-top:8px;line-height:1.7}
-  .controls{display:flex;gap:14px;align-items:flex-end;margin:20px 0;flex-wrap:wrap}
-  .ctl label{display:block;font-size:10px;color:#8b949e;text-transform:uppercase;
-             letter-spacing:.08em;margin-bottom:4px}
-  select{background:#161d28;color:#e6edf3;border:1px solid #2c3645;padding:7px 10px;
-         border-radius:4px;font-family:ui-monospace,monospace;font-size:12px;min-width:240px}
-  select:hover{border-color:#ffb000}
   img{display:block;max-width:100%;background:#fff;border-radius:6px;margin:8px 0}
-  #plot{background:#fff;border-radius:6px;padding:8px;margin-top:8px}
-  .stats{color:#8b949e;font-size:11px;font-family:ui-monospace,monospace;
-         margin-top:8px;padding:10px 14px;background:#161d28;border-radius:4px}
-  .note{color:#8b949e;font-size:11px;margin:4px 0 12px}
   nav{position:sticky;top:0;background:#0c1118;border-bottom:1px solid #2c3645;
-      padding:8px 0;margin:0 0 16px;z-index:10}
+      padding:8px 0;margin:0 0 16px;z-index:20}
   nav a{color:#8b949e;text-decoration:none;font-size:12px;margin-right:18px}
   nav a:hover{color:#ffb000}
+  .note{color:#8b949e;font-size:11px;margin:4px 0 12px}
+
+  /* workbench */
+  .wb-grid{display:grid;grid-template-columns:300px 1fr;gap:16px;margin-top:12px}
+  .lib,.bench{background:#161d28;border:1px solid #2c3645;border-radius:6px;padding:14px}
+  .lib h3,.bench h3{margin-top:0;color:#ffb000;font-size:11px;text-transform:uppercase;
+                    letter-spacing:.08em}
+  #libFilter{width:100%;background:#0c1118;border:1px solid #2c3645;color:#e6edf3;
+             padding:6px 8px;border-radius:4px;font-size:12px;margin-bottom:6px;box-sizing:border-box}
+  .lib-actions{display:flex;gap:6px;margin-bottom:10px}
+  .lib-actions button{flex:1;background:#0c1118;color:#8b949e;border:1px solid #2c3645;
+                      padding:5px 8px;border-radius:4px;font-size:11px;cursor:pointer;
+                      font-family:ui-monospace,monospace}
+  .lib-actions button:hover{color:#ffb000;border-color:#ffb000}
+  .wafer-list{max-height:620px;overflow-y:auto;padding-right:4px}
+  .wafer-card{background:#0c1118;border:1px solid #2c3645;border-radius:4px;
+              padding:8px 10px;margin:4px 0;cursor:grab;font-size:11px;
+              transition:border-color .12s}
+  .wafer-card:hover{border-color:#ffb000}
+  .wafer-card.active{border-color:#ffb000;background:#1a2230}
+  .wafer-card.dragging{opacity:.5}
+  .wafer-card .title{color:#e6edf3;font-weight:500;line-height:1.4}
+  .wafer-card .meta{color:#8b949e;font-size:10px;margin-top:2px;font-family:ui-monospace,monospace}
+
+  .drop-zone{min-height:54px;border:2px dashed #2c3645;border-radius:4px;padding:8px;
+             display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;
+             transition:all .12s}
+  .drop-zone.over{border-color:#ffb000;background:#1a2230}
+  .drop-zone:empty::before{content:'\2014  드래그하거나 카드 클릭으로 wafer 추가  \2014';
+                           color:#4b5563;font-size:11px;margin:auto;
+                           font-family:ui-monospace,monospace}
+  .chip{background:#2c3645;color:#e6edf3;padding:4px 8px;border-radius:4px;font-size:11px;
+        display:inline-flex;gap:6px;align-items:center;font-family:ui-monospace,monospace}
+  .chip .x{cursor:pointer;opacity:.5;font-weight:bold}
+  .chip .x:hover{opacity:1;color:#ff6b6b}
+
+  .controls{display:flex;gap:14px;align-items:flex-end;margin:14px 0;flex-wrap:wrap}
+  .ctl label{display:block;font-size:10px;color:#8b949e;text-transform:uppercase;
+             letter-spacing:.08em;margin-bottom:4px}
+  select{background:#0c1118;color:#e6edf3;border:1px solid #2c3645;padding:7px 10px;
+         border-radius:4px;font-family:ui-monospace,monospace;font-size:12px;min-width:180px}
+  select:hover{border-color:#ffb000}
+  #plot{background:#fff;border-radius:6px;padding:8px;margin-top:8px}
+  .stats{color:#8b949e;font-size:11px;font-family:ui-monospace,monospace;
+         margin-top:8px;padding:10px 14px;background:#0c1118;border-radius:4px;
+         border:1px solid #2c3645}
 </style></head>
 <body>
 <h1>FAIL MAP REPORT</h1>"""]
-html_parts.append(f"<div class='meta'>{meta_html}</div>")
-html_parts.append("""
+html.append(f"<div class='meta'>{meta_html}</div>")
+html.append("""
 <nav>
   <a href="#overview">1. Overview</a>
   <a href="#pareto">2. Pareto</a>
   <a href="#groups">3. Per-group</a>
-  <a href="#interactive">4. Interactive</a>
+  <a href="#workbench">4. Workbench</a>
 </nav>
 """)
 
-html_parts.append("<h2 id='overview'>1. Overview &mdash; total fail per die</h2>")
-html_parts.append("<div class='note'>모든 입력 파일과 모든 type 합산. color = log(1 + fail).</div>")
-html_parts.append(f"<img src='data:image/png;base64,{plot_b64['overview']}'>")
+html.append("<h2 id='overview'>1. Overview &mdash; total fail per die</h2>")
+html.append("<div class='note'>모든 입력 파일과 모든 wafer 합산. color = log(1 + fail).</div>")
+html.append(f"<img src='data:image/png;base64,{plot_b64['overview']}'>")
 
-html_parts.append("<h2 id='pareto'>2. Pareto &mdash; top fail columns</h2>")
-html_parts.append(f"<img src='data:image/png;base64,{plot_b64['pareto']}'>")
+html.append("<h2 id='pareto'>2. Pareto &mdash; top fail columns</h2>")
+html.append(f"<img src='data:image/png;base64,{plot_b64['pareto']}'>")
 
-html_parts.append("<h2 id='groups'>3. Per-group small multiples</h2>")
+html.append("<h2 id='groups'>3. Per-group small multiples</h2>")
 for g_name, n_all, b64 in group_plots:
-    html_parts.append(f"<h3>group '{g_name}' &mdash; {n_all} columns</h3>")
-    html_parts.append(f"<img src='data:image/png;base64,{b64}'>")
+    html.append(f"<h3>group '{g_name}' &mdash; {n_all} columns</h3>")
+    html.append(f"<img src='data:image/png;base64,{b64}'>")
 
-html_parts.append("<h2 id='interactive'>4. Interactive explorer</h2>")
-html_parts.append("<div class='note'>type / group / column 드롭다운으로 자유롭게 탐색. "
-                  "type 은 여러 CSV 의 같은 type 끼리 합쳐서 보여줌.</div>")
-html_parts.append("""
-<div class="controls">
-  <div class="ctl"><label>type</label><select id="typeSel"></select></div>
-  <div class="ctl"><label>group</label><select id="groupSel"></select></div>
-  <div class="ctl"><label>column</label><select id="colSel"></select></div>
+html.append("""
+<h2 id='workbench'>4. Workbench</h2>
+<div class='note'>왼쪽 라이브러리에서 wafer 카드를 워크벤치로 드래그하거나 클릭해서 추가하세요. 여러 개 올리면 SUM / MEAN / MAX 로 합쳐서 보여줍니다.</div>
+<div class="wb-grid">
+  <div class="lib">
+    <h3>Library &mdash; available wafers</h3>
+    <input type="search" id="libFilter" placeholder="filter (label 검색)...">
+    <div class="lib-actions">
+      <button id="addAll">+ add all visible</button>
+      <button id="clearAll">clear bench</button>
+    </div>
+    <div class="wafer-list" id="waferList"></div>
+  </div>
+  <div class="bench">
+    <h3>Workbench &mdash; drop wafers here</h3>
+    <div class="drop-zone" id="dropZone"></div>
+    <div class="controls">
+      <div class="ctl"><label>operation</label><select id="opSel">
+        <option value="sum">SUM</option>
+        <option value="mean">MEAN</option>
+        <option value="max">MAX</option>
+      </select></div>
+      <div class="ctl"><label>group</label><select id="groupSel"></select></div>
+      <div class="ctl"><label>column</label><select id="colSel"></select></div>
+    </div>
+    <div id="plot"></div>
+    <div class="stats" id="stats">(워크벤치가 비어있음)</div>
+  </div>
 </div>
-<div id="plot"></div>
-<div class="stats" id="stats"></div>
 """)
 
-html_parts.append("<script>")
-html_parts.append("const D = " + json.dumps(js_data, separators=(",", ":")) + ";")
-html_parts.append(r"""
-const AGG = D.AGG, XS = D.XS, YS = D.YS, GROUPS = D.GROUPS,
-      TYPES = D.TYPES, VMAX = D.VMAX, PSIZE = D.PSIZE;
+html.append("<script>")
+html.append("const D = " + json.dumps(js_data, separators=(",", ":")) + ";")
+html.append(r"""
+const WAFERS = D.WAFERS, XS = D.XS, YS = D.YS, GROUPS = D.GROUPS, PSIZE = D.PSIZE;
 
-const typeSel  = document.getElementById('typeSel');
-const groupSel = document.getElementById('groupSel');
-const colSel   = document.getElementById('colSel');
-const statsEl  = document.getElementById('stats');
+const waferList = document.getElementById('waferList');
+const dropZone  = document.getElementById('dropZone');
+const groupSel  = document.getElementById('groupSel');
+const colSel    = document.getElementById('colSel');
+const opSel     = document.getElementById('opSel');
+const statsEl   = document.getElementById('stats');
+const filterEl  = document.getElementById('libFilter');
 
-TYPES.forEach(t => {
-  const o = document.createElement('option');
-  o.value = t;
-  o.textContent = (t === '__ALL__') ? '\u2014 all (combined) \u2014' : t;
-  typeSel.appendChild(o);
+const active = new Set();
+
+// build library cards
+Object.entries(WAFERS).forEach(([wid, w]) => {
+  const card = document.createElement('div');
+  card.className = 'wafer-card';
+  card.draggable = true;
+  card.dataset.id = wid;
+  card.dataset.search = w.label.toLowerCase();
+  card.innerHTML = '<div class="title">' + w.label + '</div>' +
+                   '<div class="meta">' + w.nRows.toLocaleString() + ' rows</div>';
+  card.addEventListener('dragstart', e => {
+    e.dataTransfer.setData('text/plain', wid);
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', () => card.classList.remove('dragging'));
+  card.addEventListener('click', () => toggleWafer(wid));
+  waferList.appendChild(card);
 });
 
+// build groups & cols
 const groupNames = Object.keys(GROUPS).sort();
 [['__ALL__','\u2014 all columns \u2014'],
  ['__TOTAL__','\u2014 total only \u2014'],
@@ -423,7 +496,8 @@ function refreshCols() {
   colSel.innerHTML = '';
   let cols;
   if (g === '__ALL__') {
-    cols = ['__TOTAL__', ...Object.keys(AGG['__ALL__']).filter(k => k !== '__TOTAL__')];
+    const sample = Object.values(WAFERS)[0].data;
+    cols = ['__TOTAL__', ...Object.keys(sample).filter(k => k !== '__TOTAL__')];
   } else if (g === '__TOTAL__') {
     cols = ['__TOTAL__'];
   } else {
@@ -438,61 +512,143 @@ function refreshCols() {
   draw();
 }
 
-function draw() {
-  const t = typeSel.value;
-  const c = colSel.value;
-  if (!AGG[t] || !AGG[t][c]) return;
-  const colors = AGG[t][c];
+// drag-drop
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('over');
+  const wid = e.dataTransfer.getData('text/plain');
+  if (wid) addWafer(wid);
+});
 
-  let nonzero = 0, sumOrig = 0, maxLog = 0;
-  for (const v of colors) {
-    if (v > 0) { nonzero++; sumOrig += Math.expm1(v); }
-    if (v > maxLog) maxLog = v;
+function toggleWafer(wid) {
+  if (active.has(wid)) removeWafer(wid);
+  else addWafer(wid);
+}
+function addWafer(wid) {
+  if (active.has(wid) || !WAFERS[wid]) return;
+  active.add(wid);
+  document.querySelector(`.wafer-card[data-id="${wid}"]`)?.classList.add('active');
+  renderChips(); draw();
+}
+function removeWafer(wid) {
+  active.delete(wid);
+  document.querySelector(`.wafer-card[data-id="${wid}"]`)?.classList.remove('active');
+  renderChips(); draw();
+}
+function renderChips() {
+  dropZone.innerHTML = '';
+  active.forEach(wid => {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.innerHTML = '<span>' + WAFERS[wid].label + '</span><span class="x">\u00d7</span>';
+    chip.querySelector('.x').addEventListener('click', () => removeWafer(wid));
+    dropZone.appendChild(chip);
+  });
+}
+
+// filter
+filterEl.addEventListener('input', () => {
+  const q = filterEl.value.toLowerCase();
+  document.querySelectorAll('.wafer-card').forEach(card => {
+    card.style.display = card.dataset.search.includes(q) ? '' : 'none';
+  });
+});
+
+// quick actions
+document.getElementById('addAll').addEventListener('click', () => {
+  document.querySelectorAll('.wafer-card').forEach(card => {
+    if (card.style.display !== 'none') addWafer(card.dataset.id);
+  });
+});
+document.getElementById('clearAll').addEventListener('click', () => {
+  active.forEach(wid => document.querySelector(`.wafer-card[data-id="${wid}"]`)?.classList.remove('active'));
+  active.clear(); renderChips(); draw();
+});
+
+// draw
+function aggregateActive() {
+  const col = colSel.value;
+  const op  = opSel.value;
+  const N = XS.length;
+  const out = new Array(N).fill(0);
+  if (active.size === 0) return null;
+  let cnt = 0;
+  for (const wid of active) {
+    const arr = WAFERS[wid].data[col];
+    if (!arr) continue;
+    if (op === 'max') {
+      for (let i = 0; i < N; i++) if (arr[i] > out[i]) out[i] = arr[i];
+    } else {
+      for (let i = 0; i < N; i++) out[i] += arr[i];
+    }
+    cnt++;
   }
-  const maxOrig = Math.round(Math.expm1(maxLog));
+  if (op === 'mean' && cnt > 0) {
+    for (let i = 0; i < N; i++) out[i] /= cnt;
+  }
+  return out;
+}
+
+function draw() {
+  const values = aggregateActive();
+  if (!values) {
+    Plotly.purge('plot');
+    statsEl.textContent = '(워크벤치가 비어있음)';
+    return;
+  }
+  const col = colSel.value;
+  const op  = opSel.value;
+  // values 는 원본 스케일; log1p 로 색깔
+  const colors = values.map(v => Math.log1p(Math.max(0, v)));
+  const vmax = Math.max(1, ...colors);
+
+  let nz = 0, sum = 0, mx = 0;
+  for (const v of values) {
+    if (v > 0) { nz++; sum += v; }
+    if (v > mx) mx = v;
+  }
 
   statsEl.textContent =
-    'type: ' + (t === '__ALL__' ? '(all)' : t) +
-    '   \u00b7   column: ' + c +
-    '   \u00b7   die with fails: ' + nonzero.toLocaleString() + ' / ' + colors.length.toLocaleString() +
-    '   \u00b7   total fail: ' + Math.round(sumOrig).toLocaleString() +
-    '   \u00b7   max per die: ' + maxOrig.toLocaleString();
+    'wafers: ' + active.size +
+    '   \u00b7   op: ' + op.toUpperCase() +
+    '   \u00b7   column: ' + col +
+    '   \u00b7   die with fails: ' + nz.toLocaleString() + ' / ' + values.length.toLocaleString() +
+    '   \u00b7   total: ' + Math.round(sum).toLocaleString() +
+    '   \u00b7   max per die: ' + Math.round(mx).toLocaleString();
 
   const trace = {
     x: XS, y: YS,
-    mode: 'markers',
-    type: 'scattergl',
+    mode: 'markers', type: 'scattergl',
     marker: {
-      color: colors,
-      colorscale: 'Inferno',
-      size: PSIZE,
-      symbol: 'square',
-      cmin: 0, cmax: VMAX,
+      color: colors, colorscale: 'Inferno',
+      size: PSIZE, symbol: 'square',
+      cmin: 0, cmax: vmax,
       colorbar: { title: 'log1p(fail)', thickness: 14 }
     },
     hovertemplate: 'x=%{x}, y=%{y}<br>log1p=%{marker.color:.2f}<extra></extra>'
   };
   const layout = {
-    title: { text: (t === '__ALL__' ? '(all)' : t) + '  |  ' + c, font: { size: 13 } },
+    title: { text: active.size + ' wafer' + (active.size > 1 ? 's' : '') + ' · ' + op + ' · ' + col, font: { size: 13 } },
     xaxis: { scaleanchor: 'y', showgrid: false, zeroline: false },
     yaxis: { showgrid: false, zeroline: false },
-    height: 720,
+    height: 680,
     margin: { l: 40, r: 40, t: 50, b: 40 },
-    plot_bgcolor: '#fafafa',
-    paper_bgcolor: '#fff'
+    plot_bgcolor: '#fafafa', paper_bgcolor: '#fff'
   };
   Plotly.react('plot', [trace], layout, { displaylogo: false, responsive: true });
 }
 
-typeSel.addEventListener('change', draw);
 groupSel.addEventListener('change', refreshCols);
 colSel.addEventListener('change', draw);
+opSel.addEventListener('change', draw);
 refreshCols();
 """)
-html_parts.append("</script></body></html>")
+html.append("</script></body></html>")
 
-Path(OUTPUT_HTML).write_text("\n".join(html_parts), encoding="utf-8")
+Path(OUTPUT_HTML).write_text("\n".join(html), encoding="utf-8")
 size_mb = Path(OUTPUT_HTML).stat().st_size / 1024 / 1024
 print(f"\nHTML saved -> {OUTPUT_HTML}  ({size_mb:.1f} MB)")
 if size_mb > 100:
-    print("  * 용량이 큽니다. MAX_INTERACTIVE_COLS = 100 같이 제한하면 작아집니다.")
+    print("  * 용량 큼. MAX_INTERACTIVE_COLS = 100 같이 제한 가능.")
