@@ -494,3 +494,31 @@ print(f'매핑된 세션: {mapped_login:,} ({mapped_login/total*100:.1f}%)')
 print(f'매핑 안 된 세션: {total - mapped_login:,}')
 print('세션당 user_id 수 분포:')
 print(sess['n_users_login'].value_counts().sort_index().head(10))
+
+# user mapping 추가
+import re
+
+USER_ID_EQ = re.compile(r"user_id\s*=\s*'([^']+)'", re.IGNORECASE)
+USER_ID_IN = re.compile(r"user_id\s+in\s*\(([^)]+)\)", re.IGNORECASE)
+
+def extract_login_user(row):
+    fn = (row['function'] or '').lower()
+    if 'login' not in fn and 'sso' not in fn:
+        return None
+    for sql in (row['sqls'] or []):
+        m = USER_ID_EQ.search(sql)
+        if m: return m.group(1)
+        m = USER_ID_IN.search(sql)
+        if m:
+            vals = [v.strip().strip("'\"") for v in m.group(1).split(',')]
+            if vals: return vals[0]
+    return None
+
+df['login_user_id'] = df.apply(extract_login_user, axis=1)
+
+# 세션 (ip, port) 단위로 전파
+session_user = df.dropna(subset=['login_user_id']).groupby(['ip','port'])['login_user_id'].first().to_dict()
+df['session_user_id'] = df.apply(lambda r: session_user.get((r['ip'], r['port'])), axis=1)
+
+print(f"매핑된 calls: {df['session_user_id'].notna().sum():,} / {len(df):,}")
+print(f"고유 user: {df['session_user_id'].nunique()}")
