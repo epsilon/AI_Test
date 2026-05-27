@@ -523,10 +523,43 @@ const _joinMax = Math.max(1, ...Object.values(joinEdges));
 const _sessMax = Math.max(1, ...Object.values(sessionEdges));
 
 const searchInput = document.getElementById('search');
-searchInput.addEventListener('input', e => { filterQuery = e.target.value.trim().toLowerCase(); });
+searchInput.addEventListener('input', e => {
+  filterQuery = e.target.value.trim().toLowerCase();
+  recomputeVisibleTables();
+});
 function ipVisible(s) {
   if (!filterQuery) return true;
   return (s || '').toLowerCase().includes(filterQuery);
+}
+
+// for tables view: filter shows matched table + its 1-hop neighbors via edges
+let visibleTablesNow = null;
+function isDirectMatch(name) {
+  if (!filterQuery) return true;
+  return (name || '').toLowerCase().includes(filterQuery);
+}
+function recomputeVisibleTables() {
+  if (!filterQuery) { visibleTablesNow = null; return; }
+  const direct = new Set();
+  for (const p of tableParticles) {
+    if (isDirectMatch(p.table)) direct.add(p.table);
+  }
+  const all = new Set(direct);
+  for (const k of Object.keys(joinEdges)) {
+    const [a, b] = k.split('__');
+    if (direct.has(a)) all.add(b);
+    if (direct.has(b)) all.add(a);
+  }
+  for (const k of Object.keys(sessionEdges)) {
+    const [a, b] = k.split('__');
+    if (direct.has(a)) all.add(b);
+    if (direct.has(b)) all.add(a);
+  }
+  visibleTablesNow = all;
+}
+function tableInView(name) {
+  if (!visibleTablesNow) return true;
+  return visibleTablesNow.has(name);
 }
 
 let mouseX = -100, mouseY = -100;
@@ -618,6 +651,8 @@ function renderTableParticles() {
       const [a, b] = k.split('__');
       const pa = particleByTable[a], pb = particleByTable[b];
       if (!pa || !pb) continue;
+      // when filtering: at least one endpoint must be a direct match
+      if (filterQuery && !isDirectMatch(a) && !isDirectMatch(b)) continue;
       const cnt = sessionEdges[k];
       const alpha = Math.min(0.5, 0.05 + (cnt / _sessMax) * 0.45);
       ctx.strokeStyle = `rgba(135, 206, 250, ${alpha})`;
@@ -631,6 +666,7 @@ function renderTableParticles() {
       const [a, b] = k.split('__');
       const pa = particleByTable[a], pb = particleByTable[b];
       if (!pa || !pb) continue;
+      if (filterQuery && !isDirectMatch(a) && !isDirectMatch(b)) continue;
       const cnt = joinEdges[k];
       const alpha = Math.min(0.75, 0.1 + (cnt / _joinMax) * 0.65);
       ctx.strokeStyle = `rgba(217, 96, 96, ${alpha})`;
@@ -657,7 +693,7 @@ function renderTableParticles() {
 
   let hoverP = null;
   for (const p of tableParticles) {
-    if (!ipVisible(p.table)) continue;
+    if (!tableInView(p.table)) continue;
 
     // attraction to domain center — only when clustered
     if (clustered) {
