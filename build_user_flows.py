@@ -1077,10 +1077,11 @@ document.querySelectorAll('#users-controls button[data-metric]').forEach(btn => 
 });
 
 // --- LINEAGE view ---
-const lineageJoins = {};       // {table: {otherTable: {keys: Set, count}}}
-const lineageNext = {};        // {table: {otherTable: count}}
+const lineageJoins = {};
+const lineageNext = {};
 const lineagePrev = {};
-const lineageWhereValues = {}; // {table: {column: Set}}
+const lineageUnions = {};
+const lineageWhereValues = {};
 
 for (const c of CALLS) {
   for (const pair of (c.join_pairs || [])) {
@@ -1095,6 +1096,14 @@ for (const c of CALLS) {
     lineageJoins[tb][ta].keys.add(`${kb} = ${ka}`);
     lineageJoins[tb][ta].count++;
   }
+  for (const pair of (c.union_pairs || [])) {
+    const [a, b] = pair;
+    if (!a || !b) continue;
+    if (!lineageUnions[a]) lineageUnions[a] = {};
+    if (!lineageUnions[b]) lineageUnions[b] = {};
+    lineageUnions[a][b] = (lineageUnions[a][b] || 0) + 1;
+    lineageUnions[b][a] = (lineageUnions[b][a] || 0) + 1;
+  }
   if (c.where_values) {
     for (const t of (c.tables || [])) {
       if (!lineageWhereValues[t]) lineageWhereValues[t] = {};
@@ -1106,29 +1115,56 @@ for (const c of CALLS) {
   }
 }
 
-// session adjacency
-{
-  const portCalls = {};
-  for (const c of CALLS) {
-    const k = `${c.ip}:${c.port}`;
-    (portCalls[k] = portCalls[k] || []).push(c);
-  }
-  for (const k of Object.keys(portCalls)) {
-    const arr = portCalls[k].sort((a, b) => (a._start || 0) - (b._start || 0));
-    for (let i = 0; i < arr.length - 1; i++) {
-      const ta = arr[i].tables || [];
-      const tb = arr[i+1].tables || [];
-      for (const a of ta) {
-        for (const b of tb) {
-          if (a === b) continue;
-          if (!lineageNext[a]) lineageNext[a] = {};
-          lineageNext[a][b] = (lineageNext[a][b] || 0) + 1;
-          if (!lineagePrev[b]) lineagePrev[b] = {};
-          lineagePrev[b][a] = (lineagePrev[b][a] || 0) + 1;
-        }
-      }
+// session calls list (sorted by time)
+const sessionCallsList = {};
+for (const c of CALLS) {
+  const k = `${c.ip}:${c.port}`;
+  (sessionCallsList[k] = sessionCallsList[k] || []).push(c);
+}
+for (const k of Object.keys(sessionCallsList)) {
+  sessionCallsList[k].sort((a, b) => (a._start || 0) - (b._start || 0));
+  // session adjacency
+  const arr = sessionCallsList[k];
+  for (let i = 0; i < arr.length - 1; i++) {
+    const ta = arr[i].tables || [];
+    const tb = arr[i+1].tables || [];
+    for (const a of ta) for (const b of tb) {
+      if (a === b) continue;
+      if (!lineageNext[a]) lineageNext[a] = {};
+      lineageNext[a][b] = (lineageNext[a][b] || 0) + 1;
+      if (!lineagePrev[b]) lineagePrev[b] = {};
+      lineagePrev[b][a] = (lineagePrev[b][a] || 0) + 1;
     }
   }
+}
+
+// sessions containing each table
+const sessionsByTable = {};
+for (const k of Object.keys(sessionCallsList)) {
+  const seen = new Set();
+  for (const c of sessionCallsList[k]) for (const t of (c.tables || [])) seen.add(t);
+  for (const t of seen) (sessionsByTable[t] = sessionsByTable[t] || []).push(k);
+}
+
+function computeLineagePatterns(selectedTable, windowSize) {
+  const sessions = sessionsByTable[selectedTable] || [];
+  const patterns = {};
+  for (const sk of sessions) {
+    const calls = sessionCallsList[sk];
+    const idx = calls.findIndex(c => (c.tables || []).includes(selectedTable));
+    if (idx < 0) continue;
+    const start = Math.max(0, idx - windowSize);
+    const end = Math.min(calls.length, idx + windowSize + 1);
+    const path = calls.slice(start, end);
+    const localIdx = idx - start;
+    const sig = path.map((c, i) => (c.function || '?') + (i === localIdx ? '*' : '')).join('|');
+    if (!patterns[sig]) {
+      patterns[sig] = { sig, sample: path, selectedIdx: localIdx, count: 0,
+                        isStart: start === 0, isEnd: end === calls.length };
+    }
+    patterns[sig].count++;
+  }
+  return Object.values(patterns).sort((a, b) => b.count - a.count);
 }
 
 // all tables, mapping-agnostic, sorted by duration
@@ -1153,12 +1189,12 @@ const lineageTableItems = [];
   lineageTableItems.forEach(it => it.value = it.duration);
 }
 
-let lineageMode = 'treemap';   // 'treemap' | 'detail'
+let lineageMode = 'treemap';
 let lineageSelected = null;
+let lineageWindow = 2;  // path window size
 let lineageRects = [];
 let lineageHover = null;
 let lineageDetailHover = null;
-let lineageDetailBoxes = [];
 
 let lineageScale = 1, lineageOffX = 0, lineageOffY = 0;
 function resetLineageZoom() { lineageScale = 1; lineageOffX = 0; lineageOffY = 0; }
@@ -1243,190 +1279,196 @@ function renderLineageTreemap() {
   }
 }
 
-function layoutLineageDetail() {
-  const W = vw, H = vh;
-  const cx = W / 2, cy = H / 2 + 20;
-  const centerW = 240, centerH = 84;
-  const center = { x: cx - centerW/2, y: cy - centerH/2, w: centerW, h: centerH, table: lineageSelected, type: 'center' };
-
-  const joins = lineageJoins[lineageSelected] || {};
-  const joinEntries = Object.entries(joins).sort((a, b) => b[1].count - a[1].count);
-  const topJoins = joinEntries.filter((_, i) => i % 2 === 0).slice(0, 5);
-  const botJoins = joinEntries.filter((_, i) => i % 2 === 1).slice(0, 5);
-
-  const joinW = 160, joinH = 58, joinGap = 22;
-  const layoutRow = (joins, y, type) => {
-    if (!joins.length) return [];
-    const totalW = joins.length * joinW + (joins.length - 1) * joinGap;
-    const startX = (W - totalW) / 2;
-    return joins.map(([t, info], i) => ({
-      x: startX + i * (joinW + joinGap), y, w: joinW, h: joinH,
-      table: t, keys: [...info.keys].slice(0, 3), count: info.count, type,
-    }));
-  };
-  const top = layoutRow(topJoins, cy - 230, 'join_top');
-  const bot = layoutRow(botJoins, cy + 170, 'join_bot');
-
-  const prevs = lineagePrev[lineageSelected] || {};
-  const nexts = lineageNext[lineageSelected] || {};
-  const prevEntries = Object.entries(prevs).sort((a, b) => b[1] - a[1]).slice(0, 4);
-  const nextEntries = Object.entries(nexts).sort((a, b) => b[1] - a[1]).slice(0, 4);
-
-  const sideW = 150, sideH = 42, sideGap = 12;
-  const sideLayout = (entries, x, type) => {
-    if (!entries.length) return [];
-    const totalH = entries.length * sideH + (entries.length - 1) * sideGap;
-    const startY = cy - totalH / 2;
-    return entries.map(([t, count], i) => ({
-      x, y: startY + i * (sideH + sideGap), w: sideW, h: sideH,
-      table: t, count, type,
-    }));
-  };
-  const prev = sideLayout(prevEntries, 30, 'prev');
-  const next = sideLayout(nextEntries, W - sideW - 30, 'next');
-
-  return { center, top, bot, prev, next };
-}
-
 function renderLineageDetail() {
   if (!lineageSelected) return;
-  const layout = layoutLineageDetail();
+  const patterns = computeLineagePatterns(lineageSelected, lineageWindow);
+  const totalSessions = patterns.reduce((s, p) => s + p.count, 0);
 
+  // header
   ctx.save();
   ctx.fillStyle = 'rgba(245,241,232,0.85)';
   ctx.font = '300 28px Fraunces, serif';
   ctx.textAlign = 'center';
-  ctx.fillText('Lineage of ' + lineageSelected, vw/2, 64);
+  ctx.fillText('Lineage of ' + lineageSelected, vw/2, 50);
   ctx.fillStyle = 'rgba(139,134,128,0.85)';
   ctx.font = '10px JetBrains Mono';
-  ctx.fillText('JOIN — vertical (red) · session adjacent — horizontal (blue) · click any box to navigate · ESC to back', vw/2, 84);
+  ctx.fillText(`${patterns.length} unique paths · ${totalSessions} sessions · window=±${lineageWindow} · click box to navigate · ESC to back`, vw/2, 72);
   ctx.restore();
 
-  // JOIN connection lines + key labels
-  ctx.lineWidth = 1.5;
-  for (const b of [...layout.top, ...layout.bot]) {
-    const fromX = layout.center.x + layout.center.w / 2;
-    const fromY = b.type === 'join_top' ? layout.center.y : layout.center.y + layout.center.h;
-    const toX = b.x + b.w / 2;
-    const toY = b.type === 'join_top' ? b.y + b.h : b.y;
-    ctx.strokeStyle = 'rgba(217, 96, 96, 0.55)';
-    ctx.beginPath();
-    ctx.moveTo(fromX, fromY);
-    ctx.bezierCurveTo(fromX, (fromY+toY)/2, toX, (fromY+toY)/2, toX, toY);
-    ctx.stroke();
-
-    if (b.keys && b.keys.length) {
-      ctx.font = '10px JetBrains Mono';
-      ctx.textAlign = 'center';
-      const midX = (fromX + toX) / 2;
-      const midY = (fromY + toY) / 2;
-      const labelMaxW = Math.max(...b.keys.map(s => ctx.measureText(s).width));
-      const lineH = 13;
-      const bgH = b.keys.length * lineH + 8;
-      ctx.fillStyle = 'rgba(15,12,10,0.92)';
-      ctx.fillRect(midX - labelMaxW/2 - 6, midY - bgH/2, labelMaxW + 12, bgH);
-      ctx.strokeStyle = 'rgba(217, 96, 96, 0.55)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(midX - labelMaxW/2 - 6, midY - bgH/2, labelMaxW + 12, bgH);
-      ctx.fillStyle = 'rgba(232, 180, 140, 0.95)';
-      b.keys.forEach((k, i) => {
-        ctx.fillText(k, midX, midY - bgH/2 + lineH * (i+1) - 1);
-      });
-    }
-  }
-  ctx.textAlign = 'left';
-
-  // PREV/NEXT lines
-  for (const b of [...layout.prev, ...layout.next]) {
-    const isPrev = b.type === 'prev';
-    const fromX = isPrev ? b.x + b.w : layout.center.x + layout.center.w;
-    const fromY = b.y + b.h / 2;
-    const toX = isPrev ? layout.center.x : b.x;
-    const toY = layout.center.y + layout.center.h / 2;
-
-    ctx.strokeStyle = 'rgba(135, 206, 250, 0.55)';
-    ctx.beginPath();
-    if (isPrev) { ctx.moveTo(fromX, fromY); ctx.lineTo(toX, toY); }
-    else { ctx.moveTo(fromX, toY); ctx.lineTo(toX, fromY); }
-    ctx.stroke();
-
-    ctx.fillStyle = 'rgba(135, 206, 250, 0.9)';
-    ctx.font = '9px JetBrains Mono';
+  // pattern cards
+  const maxPatterns = Math.min(patterns.length, 6);
+  if (maxPatterns === 0) {
+    ctx.fillStyle = 'rgba(139,134,128,0.7)';
+    ctx.font = '12px JetBrains Mono';
     ctx.textAlign = 'center';
-    ctx.fillText(`${b.count}×`, (fromX + toX)/2, (fromY + toY)/2 - 4);
-    ctx.textAlign = 'left';
+    ctx.fillText('No session paths found for this table', vw/2, vh/2);
+    return;
   }
 
-  // boxes
-  const allBoxes = [layout.center, ...layout.top, ...layout.bot, ...layout.prev, ...layout.next];
-  lineageDetailBoxes = allBoxes;
-  let detailHover = null;
-  for (const b of allBoxes) {
-    const hue = hashHue(b.table);
-    const isCenter = b.type === 'center';
-    const isHover = !isCenter && mouseX >= b.x && mouseX <= b.x + b.w && mouseY >= b.y && mouseY <= b.y + b.h;
-    if (isHover) detailHover = b;
+  const cardTop = 100;
+  const cardGap = 8;
+  const cardHeight = (vh - cardTop - 30 - (maxPatterns - 1) * cardGap) / maxPatterns;
 
-    ctx.fillStyle = isCenter
-      ? `hsla(${hue}, 60%, 65%, 0.95)`
-      : (isHover ? `hsla(${hue}, 55%, 70%, 0.95)` : `hsla(${hue}, 45%, 50%, 0.85)`);
-    ctx.fillRect(b.x, b.y, b.w, b.h);
-    ctx.strokeStyle = isCenter ? 'rgba(245,241,232,0.7)' : 'rgba(10,10,12,0.6)';
-    ctx.lineWidth = isCenter ? 2 : 1;
-    ctx.strokeRect(b.x, b.y, b.w, b.h);
+  let hoverBox = null;
 
-    ctx.fillStyle = 'rgba(10,10,12,0.95)';
-    ctx.font = isCenter ? 'bold 14px JetBrains Mono' : '11px JetBrains Mono';
-    let txt = b.table;
-    const charW = isCenter ? 8.5 : 7;
-    const maxLen = Math.floor((b.w - 16) / charW);
-    if (txt.length > maxLen) txt = txt.slice(0, maxLen - 1) + '…';
-    ctx.fillText(txt, b.x + 8, b.y + (isCenter ? 26 : 22));
+  for (let pi = 0; pi < maxPatterns; pi++) {
+    const p = patterns[pi];
+    const cardY = cardTop + pi * (cardHeight + cardGap);
 
-    if (b.count != null) {
-      ctx.fillStyle = 'rgba(10,10,12,0.7)';
+    // card bg
+    ctx.fillStyle = 'rgba(30, 28, 26, 0.5)';
+    ctx.fillRect(20, cardY, vw - 40, cardHeight);
+
+    // pattern header
+    ctx.fillStyle = 'rgba(232,160,74,0.9)';
+    ctx.font = 'bold 11px JetBrains Mono';
+    ctx.textAlign = 'left';
+    const pct = ((p.count / totalSessions) * 100).toFixed(1);
+    const positionTag = p.isStart && p.isEnd ? '· complete'
+                      : p.isStart ? '· starts here'
+                      : p.isEnd ? '· ends here'
+                      : '· mid-session';
+    ctx.fillText(`PATTERN ${pi+1}  ·  ${p.count} sessions (${pct}%)  ${positionTag}`, 30, cardY + 18);
+
+    // path boxes
+    const path = p.sample;
+    const innerW = vw - 60;
+    const boxW = Math.min(220, (innerW - (path.length - 1) * 14) / Math.max(path.length, 1));
+    const boxH = cardHeight - 30;
+    const startX = 30 + (innerW - (path.length * boxW + (path.length - 1) * 14)) / 2;
+    const boxY = cardY + 24;
+
+    for (let i = 0; i < path.length; i++) {
+      const c = path[i];
+      const bx = startX + i * (boxW + 14);
+      const by = boxY;
+      const isSelected = i === p.selectedIdx;
+      const tables = c.tables || [];
+
+      // arrow to next
+      if (i < path.length - 1) {
+        ctx.strokeStyle = 'rgba(135, 206, 250, 0.55)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(bx + boxW, by + boxH/2);
+        ctx.lineTo(bx + boxW + 14, by + boxH/2);
+        ctx.stroke();
+        // arrowhead
+        ctx.beginPath();
+        ctx.moveTo(bx + boxW + 14, by + boxH/2);
+        ctx.lineTo(bx + boxW + 10, by + boxH/2 - 3);
+        ctx.lineTo(bx + boxW + 10, by + boxH/2 + 3);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(135, 206, 250, 0.55)';
+        ctx.fill();
+      }
+
+      // hover detection — pick first non-selected table for nav
+      const isMouseIn = mouseX >= bx && mouseX <= bx + boxW && mouseY >= by && mouseY <= by + boxH;
+      const navTable = tables.find(t => t !== lineageSelected) || tables[0];
+      if (isMouseIn && navTable && navTable !== lineageSelected) {
+        hoverBox = { table: navTable };
+      }
+
+      // box bg
+      const hue = isSelected ? hashHue(lineageSelected) : 210;
+      if (isSelected) {
+        ctx.fillStyle = isMouseIn ? `hsla(${hue}, 60%, 65%, 0.95)` : `hsla(${hue}, 55%, 55%, 0.9)`;
+      } else {
+        ctx.fillStyle = isMouseIn ? 'rgba(70, 80, 95, 0.95)' : 'rgba(45, 50, 60, 0.85)';
+      }
+      ctx.fillRect(bx, by, boxW, boxH);
+      ctx.strokeStyle = isSelected ? 'rgba(245,241,232,0.7)' : 'rgba(10,10,12,0.5)';
+      ctx.lineWidth = isSelected ? 2 : 1;
+      ctx.strokeRect(bx, by, boxW, boxH);
+
+      // content lines
+      let cy = by + 14;
+      ctx.textAlign = 'left';
+
+      // function name
+      ctx.fillStyle = isSelected ? 'rgba(10,10,12,0.95)' : 'rgba(245,241,232,0.95)';
+      ctx.font = 'bold 11px JetBrains Mono';
+      const fn = shortFn(c.function || '');
+      const maxFnChars = Math.floor((boxW - 16) / 7);
+      const fnTxt = fn.length > maxFnChars ? fn.slice(0, maxFnChars-1) + '…' : fn;
+      ctx.fillText(fnTxt, bx + 8, cy);
+      cy += 14;
+
+      // tables
       ctx.font = '9px JetBrains Mono';
-      const lbl = isCenter ? '' : (b.type.startsWith('join') ? b.count + ' joins' : b.count + '× adjacent');
-      if (lbl) ctx.fillText(lbl, b.x + 8, b.y + 36);
-    }
-    if (isCenter) {
-      const it = lineageTableItems.find(it => it.key === lineageSelected);
-      if (it) {
-        ctx.fillStyle = 'rgba(10,10,12,0.7)';
-        ctx.font = '9px JetBrains Mono';
-        ctx.fillText(it.count + ' calls · ' + fmtInterval(it.duration), b.x + 8, b.y + 46);
+      const maxTblChars = Math.floor((boxW - 16) / 6);
+      for (const t of tables.slice(0, 3)) {
+        if (cy >= by + boxH - 4) break;
+        const isT = t === lineageSelected;
+        ctx.fillStyle = isSelected
+          ? (isT ? 'rgba(10,10,12,1)' : 'rgba(10,10,12,0.7)')
+          : (isT ? 'rgba(245,241,232,1)' : 'rgba(180,170,150,0.85)');
+        ctx.font = isT ? 'bold 9px JetBrains Mono' : '9px JetBrains Mono';
+        const tt = t.length > maxTblChars ? t.slice(0, maxTblChars-1) + '…' : t;
+        ctx.fillText('· ' + tt, bx + 8, cy);
+        cy += 11;
+      }
+      if (tables.length > 3 && cy < by + boxH - 4) {
+        ctx.fillStyle = isSelected ? 'rgba(10,10,12,0.55)' : 'rgba(139,134,128,0.7)';
+        ctx.font = '8px JetBrains Mono';
+        ctx.fillText(`  +${tables.length - 3} tables`, bx + 8, cy);
+        cy += 10;
+      }
+
+      // JOIN keys
+      const jp = c.join_pairs || [];
+      if (jp.length && cy < by + boxH - 10) {
+        ctx.fillStyle = isSelected ? 'rgba(120, 40, 20, 0.85)' : 'rgba(217, 130, 100, 0.9)';
+        ctx.font = 'bold 8px JetBrains Mono';
+        ctx.fillText('JOIN', bx + 8, cy);
+        cy += 10;
+        ctx.font = '8px JetBrains Mono';
+        const seen = new Set();
+        for (const [ta, ka, tb, kb] of jp) {
+          if (cy >= by + boxH - 4) break;
+          const k = `${ka}=${kb}`;
+          if (seen.has(k) || seen.has(`${kb}=${ka}`)) continue;
+          seen.add(k);
+          const txt = `  ${ka}=${kb}`;
+          const shown = txt.length > maxTblChars ? txt.slice(0, maxTblChars-1) + '…' : txt;
+          ctx.fillText(shown, bx + 8, cy);
+          cy += 10;
+        }
+      }
+
+      // UNION
+      const up = c.union_pairs || [];
+      if (up.length && cy < by + boxH - 4) {
+        ctx.fillStyle = isSelected ? 'rgba(20, 60, 100, 0.85)' : 'rgba(140, 180, 220, 0.9)';
+        ctx.font = 'bold 8px JetBrains Mono';
+        ctx.fillText(`UNION (${up.length})`, bx + 8, cy);
+        cy += 10;
+      }
+
+      // WHERE values
+      const wv = c.where_values || {};
+      const wvEntries = Object.entries(wv);
+      if (wvEntries.length && cy < by + boxH - 10) {
+        ctx.fillStyle = isSelected ? 'rgba(40, 70, 30, 0.85)' : 'rgba(170, 200, 140, 0.85)';
+        ctx.font = 'bold 8px JetBrains Mono';
+        ctx.fillText('WHERE', bx + 8, cy);
+        cy += 10;
+        ctx.font = '8px JetBrains Mono';
+        for (const [col, vals] of wvEntries.slice(0, 3)) {
+          if (cy >= by + boxH - 2) break;
+          const valArr = vals.slice(0, 2);
+          const txt = `  ${col}='${valArr.join("','")}'`;
+          const shown = txt.length > maxTblChars ? txt.slice(0, maxTblChars-1) + '…' : txt;
+          ctx.fillText(shown, bx + 8, cy);
+          cy += 10;
+        }
       }
     }
   }
-  lineageDetailHover = detailHover;
 
-  // WHERE values
-  const wv = lineageWhereValues[lineageSelected];
-  if (wv && Object.keys(wv).length) {
-    const wvX = 30, wvY = 130;
-    ctx.fillStyle = 'rgba(245,241,232,0.8)';
-    ctx.font = '11px JetBrains Mono';
-    ctx.textAlign = 'left';
-    ctx.fillText('WHERE values seen on this table:', wvX, wvY);
-    ctx.fillStyle = 'rgba(180,170,150,0.85)';
-    ctx.font = '10px JetBrains Mono';
-    let y = wvY + 18;
-    const entries = Object.entries(wv).slice(0, 8);
-    for (const [col, vals] of entries) {
-      const valArr = [...vals].slice(0, 5);
-      const txt = `  ${col} = ${valArr.map(v => `'${v}'`).join(', ')}`;
-      const maxChars = 90;
-      const shown = txt.length > maxChars ? txt.slice(0, maxChars-1) + '…' : txt;
-      ctx.fillText(shown, wvX, y);
-      y += 15;
-    }
-    if (Object.keys(wv).length > 8) {
-      ctx.fillStyle = 'rgba(139,134,128,0.6)';
-      ctx.fillText(`  + ${Object.keys(wv).length - 8} more columns`, wvX, y);
-    }
-  }
-
-  canvas.style.cursor = detailHover ? 'pointer' : 'default';
+  lineageDetailHover = hoverBox;
+  canvas.style.cursor = hoverBox ? 'pointer' : 'default';
   document.getElementById('tooltip').style.display = 'none';
 }
 
@@ -2316,6 +2358,7 @@ def build_user_flows(df: pd.DataFrame, out_path: str = 'user_flows.html'):
             'tables': list(row.get('tables') or []),
             'session_user_id': row.get('session_user_id') if pd.notna(row.get('session_user_id')) else None,
             'join_pairs': list(row.get('join_pairs') or []),
+            'union_pairs': list(row.get('union_pairs') or []),
             'where_values': dict(row.get('where_values') or {}),
         })
 
