@@ -327,10 +327,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button id="stream-reset">↺ RESTART</button>
 </div>
 
-<div class="bottom-controls" id="users-controls" style="left: 28px;">
-  <button data-mode="mapped_users" class="active">MAPPED · USERS</button>
-  <button data-mode="mapped_tables">MAPPED · TABLES</button>
-  <button data-mode="unmapped">UNMAPPED · TABLES</button>
+<div class="bottom-controls" id="users-controls" style="left: 28px; flex-direction: column; align-items: flex-start; gap: 6px;">
+  <div style="display: flex; gap: 8px;">
+    <button data-mode="mapped_users" class="active">MAPPED · USERS</button>
+    <button data-mode="mapped_tables">MAPPED · TABLES</button>
+    <button data-mode="unmapped">UNMAPPED · TABLES</button>
+  </div>
+  <div style="display: flex; gap: 8px;">
+    <button data-metric="count" class="active">BY CALL COUNT</button>
+    <button data-metric="duration">BY DURATION</button>
+  </div>
 </div>
 
 <div class="tooltip" id="tooltip">
@@ -730,6 +736,11 @@ function _functionsOf(calls) {
   for (const c of calls) cnt[c.function] = (cnt[c.function] || 0) + 1;
   return Object.entries(cnt).sort((a, b) => b[1] - a[1]).map(e => e[0]);
 }
+function _durationOf(calls) {
+  let s = 0;
+  for (const c of calls) s += (c.duration_ms || 0);
+  return s;
+}
 
 // mapped users
 const callsByUser = {};
@@ -737,9 +748,13 @@ for (const c of mappedCalls) {
   const u = c.session_user_id;
   (callsByUser[u] = callsByUser[u] || []).push(c);
 }
-const userItems = Object.entries(callsByUser)
-  .map(([user, calls]) => ({ key: user, calls, value: calls.length, functions: _functionsOf(calls) }))
-  .sort((a, b) => b.value - a.value);
+const userItemsBase = Object.entries(callsByUser)
+  .map(([user, calls]) => ({
+    key: user, calls,
+    count: calls.length,
+    duration: _durationOf(calls),
+    functions: _functionsOf(calls),
+  }));
 
 // mapped calls grouped by table
 const callsByMappedTable = {};
@@ -748,9 +763,13 @@ for (const c of mappedCalls) {
     (callsByMappedTable[t] = callsByMappedTable[t] || []).push(c);
   }
 }
-const mappedTableItems = Object.entries(callsByMappedTable)
-  .map(([t, calls]) => ({ key: t, calls, value: calls.length, functions: _functionsOf(calls) }))
-  .sort((a, b) => b.value - a.value);
+const mappedTableItemsBase = Object.entries(callsByMappedTable)
+  .map(([t, calls]) => ({
+    key: t, calls,
+    count: calls.length,
+    duration: _durationOf(calls),
+    functions: _functionsOf(calls),
+  }));
 
 // unmapped calls grouped by table
 const callsByUnmappedTable = {};
@@ -759,31 +778,58 @@ for (const c of unmappedCalls) {
     (callsByUnmappedTable[t] = callsByUnmappedTable[t] || []).push(c);
   }
 }
-const unmappedTableItems = Object.entries(callsByUnmappedTable)
-  .map(([t, calls]) => ({ key: t, calls, value: calls.length, functions: _functionsOf(calls) }))
-  .sort((a, b) => b.value - a.value);
+const unmappedTableItemsBase = Object.entries(callsByUnmappedTable)
+  .map(([t, calls]) => ({
+    key: t, calls,
+    count: calls.length,
+    duration: _durationOf(calls),
+    functions: _functionsOf(calls),
+  }));
+
+// pre-sort by both metrics
+function _sortByMetric(base, metric) {
+  return [...base]
+    .sort((a, b) => b[metric] - a[metric])
+    .map(it => ({ ...it, value: it[metric] }));
+}
+const _itemsCache = {
+  mapped_users: { count: _sortByMetric(userItemsBase, 'count'), duration: _sortByMetric(userItemsBase, 'duration') },
+  mapped_tables: { count: _sortByMetric(mappedTableItemsBase, 'count'), duration: _sortByMetric(mappedTableItemsBase, 'duration') },
+  unmapped: { count: _sortByMetric(unmappedTableItemsBase, 'count'), duration: _sortByMetric(unmappedTableItemsBase, 'duration') },
+};
+
+let usersMetric = 'count';  // 'count' | 'duration'
 
 function currentUsersItems() {
-  if (usersMode === 'mapped_users') return userItems;
-  if (usersMode === 'mapped_tables') return mappedTableItems;
-  return unmappedTableItems;
+  return _itemsCache[usersMode][usersMetric] || [];
 }
 function currentUsersHeaderText() {
+  const items = currentUsersItems();
+  const base = usersMode === 'mapped_users' ? userItemsBase
+             : usersMode === 'mapped_tables' ? mappedTableItemsBase
+             : unmappedTableItemsBase;
+  const callsTotal = usersMode === 'unmapped' ? unmappedCalls.length : mappedCalls.length;
+  const totalDuration = base.reduce((s, it) => s + it.duration, 0);
+  const metricLabel = usersMetric === 'count' ? 'CALL COUNT' : 'TOTAL DURATION';
+  const totalStr = usersMetric === 'count'
+    ? `${callsTotal.toLocaleString()} calls`
+    : `${fmtInterval(totalDuration)} total`;
+
   if (usersMode === 'mapped_users') {
     return [
-      `${userItems.length.toLocaleString()} mapped users`,
-      `${mappedCalls.length.toLocaleString()} of ${CALLS.length.toLocaleString()} calls mapped · scroll to zoom · drag to pan · ${(usersScale*100).toFixed(0)}%`
+      `${items.length.toLocaleString()} mapped users`,
+      `${totalStr} · sorted by ${metricLabel} · scroll to zoom · drag to pan · ${(usersScale*100).toFixed(0)}%`
     ];
   }
   if (usersMode === 'mapped_tables') {
     return [
-      `${mappedTableItems.length.toLocaleString()} tables · mapped traffic`,
-      `${mappedCalls.length.toLocaleString()} mapped calls grouped by table · scroll to zoom · drag to pan · ${(usersScale*100).toFixed(0)}%`
+      `${items.length.toLocaleString()} tables · mapped traffic`,
+      `${totalStr} · sorted by ${metricLabel} · scroll to zoom · drag to pan · ${(usersScale*100).toFixed(0)}%`
     ];
   }
   return [
-    `${unmappedTableItems.length.toLocaleString()} tables · unmapped traffic`,
-    `${unmappedCalls.length.toLocaleString()} unmapped calls grouped by table · scroll to zoom · drag to pan · ${(usersScale*100).toFixed(0)}%`
+    `${items.length.toLocaleString()} tables · unmapped traffic`,
+    `${totalStr} · sorted by ${metricLabel} · scroll to zoom · drag to pan · ${(usersScale*100).toFixed(0)}%`
   ];
 }
 function currentUsersLabelPrefix() {
@@ -907,7 +953,10 @@ function renderUsersView() {
         ctx.fillStyle = 'rgba(10,10,12,0.65)';
         ctx.font = `${Math.max(9, labelSize * 0.55)}px JetBrains Mono`;
         nextY = sy + labelSize + 4 + labelSize * 0.75;
-        ctx.fillText(r.value.toLocaleString() + ' calls · ' + (r.functions ? r.functions.length : 0) + ' fns', sx + 8, nextY);
+        const valueLabel = usersMetric === 'count'
+          ? r.count.toLocaleString() + ' calls'
+          : fmtInterval(r.duration);
+        ctx.fillText(valueLabel + ' · ' + (r.functions ? r.functions.length : 0) + ' fns', sx + 8, nextY);
       }
       // function list — show as many as fit
       if (r.functions && sh > labelSize * 4) {
@@ -947,7 +996,7 @@ function renderUsersView() {
     const fns = new Set(calls.map(c => c.function));
     const ips = new Set(calls.map(c => c.ip));
     document.getElementById('tt-meta').textContent =
-      `${calls.length.toLocaleString()} calls · ${fns.size} functions · ${ips.size} IPs`;
+      `${calls.length.toLocaleString()} calls · ${fmtInterval(hover.duration)} total · ${fns.size} functions · ${ips.size} IPs`;
     document.getElementById('tt-meta').style.whiteSpace = 'nowrap';
     tt.style.display = 'block';
     tt.style.left = (mouseX + 14) + 'px';
@@ -1007,10 +1056,19 @@ function openUserDetailPanel(r) {
   document.getElementById('panel').classList.add('open');
 }
 
-document.querySelectorAll('#users-controls button').forEach(btn => {
+document.querySelectorAll('#users-controls button[data-mode]').forEach(btn => {
   btn.addEventListener('click', () => {
     usersMode = btn.dataset.mode;
-    document.querySelectorAll('#users-controls button').forEach(b =>
+    document.querySelectorAll('#users-controls button[data-mode]').forEach(b =>
+      b.classList.toggle('active', b === btn));
+    resetUsersZoom();
+    closePanel();
+  });
+});
+document.querySelectorAll('#users-controls button[data-metric]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    usersMetric = btn.dataset.metric;
+    document.querySelectorAll('#users-controls button[data-metric]').forEach(b =>
       b.classList.toggle('active', b === btn));
     resetUsersZoom();
     closePanel();
