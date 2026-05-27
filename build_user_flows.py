@@ -742,6 +742,31 @@ function _durationOf(calls) {
   for (const c of calls) s += (c.duration_ms || 0);
   return s;
 }
+function _keywordsOf(calls) {
+  const valCount = {};   // "col='val'" -> count
+  const colCount = {};   // col -> count (where 등장)
+  const selectCols = new Set();
+  const whereCols = new Set();
+  for (const c of calls) {
+    for (const sc of (c.select_cols || [])) selectCols.add(sc);
+    const wv = c.where_values || {};
+    for (const [col, vals] of Object.entries(wv)) {
+      whereCols.add(col);
+      colCount[col] = (colCount[col] || 0) + 1;
+      for (const v of vals) {
+        const key = `${col}='${v}'`;
+        valCount[key] = (valCount[key] || 0) + 1;
+      }
+    }
+  }
+  const topValues = Object.entries(valCount).sort((a,b) => b[1]-a[1]).slice(0, 12)
+                          .map(([k, n]) => ({ key: k, count: n }));
+  const overlap = [...whereCols].filter(c => selectCols.has(c))
+                          .sort((a,b) => (colCount[b]||0) - (colCount[a]||0))
+                          .slice(0, 10)
+                          .map(c => ({ col: c, count: colCount[c] || 0 }));
+  return { topValues, overlap };
+}
 
 // mapped users
 const callsByUser = {};
@@ -755,6 +780,7 @@ const userItemsBase = Object.entries(callsByUser)
     count: calls.length,
     duration: _durationOf(calls),
     functions: _functionsOf(calls),
+    keywords: _keywordsOf(calls),
   }));
 
 // mapped calls grouped by table
@@ -770,6 +796,7 @@ const mappedTableItemsBase = Object.entries(callsByMappedTable)
     count: calls.length,
     duration: _durationOf(calls),
     functions: _functionsOf(calls),
+    keywords: _keywordsOf(calls),
   }));
 
 // unmapped calls grouped by table
@@ -785,6 +812,7 @@ const unmappedTableItemsBase = Object.entries(callsByUnmappedTable)
     count: calls.length,
     duration: _durationOf(calls),
     functions: _functionsOf(calls),
+    keywords: _keywordsOf(calls),
   }));
 
 // pre-sort by both metrics
@@ -964,25 +992,63 @@ function renderUsersView() {
         const fnSize = Math.max(8, labelSize * 0.5);
         const lineH = fnSize * 1.35;
         const listTop = nextY + lineH * 0.6;
-        const available = sh - (listTop - sy) - 6;
-        const maxLines = Math.floor(available / lineH);
+        let yy = listTop + fnSize;
         const fnMaxChars = Math.floor((sw - 16) / (fnSize * 0.6));
         ctx.font = `${fnSize}px JetBrains Mono`;
+
+        // FUNCTIONS
+        const fnAvail = (sh * 0.45) - (listTop - sy);
+        const fnMaxLines = Math.max(0, Math.floor(fnAvail / lineH));
+        const fnTotal = r.functions.length;
+        const fnReserved = fnTotal > fnMaxLines ? 1 : 0;
+        const fnShown = r.functions.slice(0, Math.max(0, fnMaxLines - fnReserved));
         ctx.fillStyle = 'rgba(10,10,12,0.55)';
-        const total = r.functions.length;
-        const showCount = Math.max(0, Math.min(total, maxLines));
-        const reservedForMore = total > maxLines ? 1 : 0;
-        const shown = r.functions.slice(0, Math.max(0, showCount - reservedForMore));
-        let yy = listTop + fnSize;
-        for (const fn of shown) {
+        for (const fn of fnShown) {
           const s = shortFn(fn);
           const t2 = s.length > fnMaxChars ? s.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : s;
           ctx.fillText(t2, sx + 8, yy);
           yy += lineH;
         }
-        if (reservedForMore) {
+        if (fnReserved && fnShown.length < fnTotal) {
           ctx.fillStyle = 'rgba(10,10,12,0.45)';
-          ctx.fillText('+ ' + (total - shown.length) + ' more', sx + 8, yy);
+          ctx.fillText('+ ' + (fnTotal - fnShown.length) + ' more', sx + 8, yy);
+          yy += lineH;
+        }
+
+        // KEYWORDS (where values)
+        if (r.keywords && r.keywords.topValues.length && yy < sy + sh - lineH * 2) {
+          yy += lineH * 0.4;
+          ctx.fillStyle = 'rgba(120, 145, 90, 0.85)';
+          ctx.font = `bold ${fnSize}px JetBrains Mono`;
+          ctx.fillText('KEYWORDS', sx + 8, yy);
+          yy += lineH;
+          ctx.font = `${fnSize}px JetBrains Mono`;
+          ctx.fillStyle = 'rgba(40, 55, 30, 0.9)';
+          for (const kw of r.keywords.topValues) {
+            if (yy >= sy + sh - lineH * 0.5) break;
+            const txt = `${kw.key} (${kw.count})`;
+            const t2 = txt.length > fnMaxChars ? txt.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : txt;
+            ctx.fillText(t2, sx + 8, yy);
+            yy += lineH;
+          }
+        }
+
+        // SELECT ∩ WHERE
+        if (r.keywords && r.keywords.overlap.length && yy < sy + sh - lineH * 2) {
+          yy += lineH * 0.4;
+          ctx.fillStyle = 'rgba(90, 120, 145, 0.85)';
+          ctx.font = `bold ${fnSize}px JetBrains Mono`;
+          ctx.fillText('SELECT∩WHERE', sx + 8, yy);
+          yy += lineH;
+          ctx.font = `${fnSize}px JetBrains Mono`;
+          ctx.fillStyle = 'rgba(30, 45, 60, 0.9)';
+          for (const ov of r.keywords.overlap) {
+            if (yy >= sy + sh - lineH * 0.5) break;
+            const txt = `${ov.col} (${ov.count})`;
+            const t2 = txt.length > fnMaxChars ? txt.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : txt;
+            ctx.fillText(t2, sx + 8, yy);
+            yy += lineH;
+          }
         }
       }
     }
@@ -2478,6 +2544,7 @@ def build_user_flows(df: pd.DataFrame, out_path: str = 'user_flows.html'):
             'join_pairs': list(row.get('join_pairs') or []),
             'union_pairs': list(row.get('union_pairs') or []),
             'where_values': dict(row.get('where_values') or {}),
+            'select_cols': list(row.get('select_cols') or []),
         })
 
     # pre-compute global time range here (much faster than in JS)
