@@ -280,6 +280,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="view-toggle" id="view-toggle">
   <button class="active" data-view="ips">BY IP</button>
   <button data-view="tables">BY TABLE</button>
+  <button data-view="stream">STREAM</button>
 </div>
 
 <div class="hint" id="hint">CLICK TO INSPECT</div>
@@ -306,6 +307,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div class="bottom-controls" id="bottom-controls">
   <button id="gather-btn">GATHER BY DOMAIN</button>
   <button id="edges-btn">SHOW LINKS</button>
+</div>
+
+<div class="bottom-controls" id="stream-controls" style="left: 28px;">
+  <button id="stream-play">⏸ PAUSE</button>
+  <button id="stream-speed-100" class="active">100×</button>
+  <button id="stream-speed-1000">1000×</button>
+  <button id="stream-speed-10000">10000×</button>
+  <button id="stream-reset">↺ RESTART</button>
 </div>
 
 <div class="tooltip" id="tooltip">
@@ -472,6 +481,140 @@ window.toggleEdges = toggleEdges;
 document.getElementById('gather-btn').addEventListener('click', toggleGather);
 document.getElementById('edges-btn').addEventListener('click', toggleEdges);
 
+// --- STREAM state ---
+const sortedCalls = [...CALLS].filter(c => c._start != null).sort((a, b) => a._start - b._start);
+let streamCursor = 0;
+let streamTime = GLOBAL_TMIN;
+let streamPlaying = true;
+let streamSpeed = 100;
+const activePulses = [];
+const ipPositions = {};
+
+function computeIpPositions() {
+  const n = ipList.length;
+  if (n === 0) return;
+  const topReserved = 160;
+  const bottomReserved = 90;
+  const w = vw;
+  const h = Math.max(100, vh - topReserved - bottomReserved);
+  const cols = Math.max(1, Math.ceil(Math.sqrt(n * (w / h))));
+  const rows = Math.ceil(n / cols);
+  const cellW = w / cols;
+  const cellH = h / rows;
+  ipList.forEach((d, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    ipPositions[d.ip] = {
+      x: cellW * (col + 0.5),
+      y: topReserved + cellH * (row + 0.5),
+    };
+  });
+}
+computeIpPositions();
+window.addEventListener('resize', computeIpPositions);
+
+function streamReset() {
+  streamTime = GLOBAL_TMIN;
+  streamCursor = 0;
+  activePulses.length = 0;
+}
+
+function tickStream(dtMs) {
+  if (!streamPlaying) return;
+  streamTime += dtMs * streamSpeed;
+  if (streamTime >= GLOBAL_TMAX) {
+    streamReset();
+    return;
+  }
+  while (streamCursor < sortedCalls.length && sortedCalls[streamCursor]._start <= streamTime) {
+    const c = sortedCalls[streamCursor];
+    const pos = ipPositions[c.ip];
+    if (pos) {
+      activePulses.push({
+        x: pos.x + (Math.random() - 0.5) * 10,
+        y: pos.y + (Math.random() - 0.5) * 10,
+        age: 0, maxAge: 1.2,
+        cache: c.cache,
+      });
+    }
+    streamCursor++;
+  }
+}
+
+function updatePulses(dtSec) {
+  for (let i = activePulses.length - 1; i >= 0; i--) {
+    activePulses[i].age += dtSec;
+    if (activePulses[i].age > activePulses[i].maxAge) activePulses.splice(i, 1);
+  }
+}
+
+function renderStream() {
+  // base IP dots (always visible, dim)
+  ctx.fillStyle = 'rgba(245,241,232,0.12)';
+  for (const pos of Object.values(ipPositions)) {
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // pulses
+  for (const p of activePulses) {
+    const t = p.age / p.maxAge;
+    const radius = 3 + t * 26;
+    const alpha = (1 - t) * 0.7;
+    let r, g, b;
+    if (p.cache === 'hit') { r = 232; g = 160; b = 74; }
+    else if (p.cache === 'miss') { r = 94; g = 192; b = 192; }
+    else { r = 180; g = 180; b = 180; }
+    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    // filled core
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha * 0.5})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // current time (large center top)
+  const d = new Date(streamTime);
+  const pad = n => String(n).padStart(2, '0');
+  const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const dateStr = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} · ${streamSpeed}× · ${activePulses.length} active`;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(245,241,232,0.85)';
+  ctx.font = '300 56px Fraunces, serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(timeStr, vw/2, 100);
+
+  ctx.fillStyle = 'rgba(139,134,128,0.8)';
+  ctx.font = '10px JetBrains Mono';
+  ctx.fillText(dateStr, vw/2, 122);
+  ctx.restore();
+
+  // progress bar
+  const progress = (streamTime - GLOBAL_TMIN) / (GLOBAL_TMAX - GLOBAL_TMIN || 1);
+  ctx.fillStyle = 'rgba(232,160,74,0.6)';
+  ctx.fillRect(0, vh - 3, vw * progress, 3);
+}
+
+document.getElementById('stream-play').addEventListener('click', () => {
+  streamPlaying = !streamPlaying;
+  document.getElementById('stream-play').textContent = streamPlaying ? '⏸ PAUSE' : '▶ PLAY';
+});
+document.getElementById('stream-reset').addEventListener('click', streamReset);
+for (const speed of [100, 1000, 10000]) {
+  document.getElementById('stream-speed-' + speed).addEventListener('click', () => {
+    streamSpeed = speed;
+    for (const s of [100, 1000, 10000]) {
+      document.getElementById('stream-speed-' + s).classList.toggle('active', s === speed);
+    }
+  });
+}
+
 // --- EDGES ---
 // JOIN edges: tables that appear in the same call (same SQL flow)
 // SESSION edges: tables that appear in consecutive calls of the same (ip,port)
@@ -573,9 +716,10 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
     mainView = btn.dataset.view;
     document.querySelectorAll('.view-toggle button').forEach(b =>
       b.classList.toggle('active', b === btn));
+    if (mainView === 'stream') streamReset();
     refreshHeader();
     closePanel();
-    searchInput.value = ''; filterQuery = '';
+    searchInput.value = ''; filterQuery = ''; recomputeVisibleTables();
   };
 });
 
@@ -590,7 +734,10 @@ function refreshHeader() {
       <span class="n">${CALLS.length.toLocaleString()}</span>CALLS`;
     document.getElementById('search').placeholder = 'filter by ip...';
     document.getElementById('bottom-controls').classList.remove('on');
-  } else {
+    document.getElementById('stream-controls').classList.remove('on');
+    document.getElementById('search-box').classList.add('on');
+    document.getElementById('hint').textContent = 'CLICK TO INSPECT';
+  } else if (mainView === 'tables') {
     document.getElementById('title').textContent = 'Table Flows';
     document.getElementById('title').classList.remove('ip-mode');
     document.getElementById('subtitle').textContent = 'EACH PARTICLE = ONE TABLE · CLICK TO SEE WHO USES IT';
@@ -599,11 +746,21 @@ function refreshHeader() {
       <span class="n">${CALLS.length.toLocaleString()}</span>CALLS`;
     document.getElementById('search').placeholder = 'filter by table...';
     document.getElementById('bottom-controls').classList.add('on');
+    document.getElementById('stream-controls').classList.remove('on');
+    document.getElementById('search-box').classList.add('on');
+    document.getElementById('hint').textContent = 'CLICK TO INSPECT';
+  } else if (mainView === 'stream') {
+    document.getElementById('title').textContent = 'Stream';
+    document.getElementById('title').classList.remove('ip-mode');
+    document.getElementById('subtitle').textContent = 'LIVE REPLAY · EACH PULSE = ONE CALL · COLOR = CACHE STATE';
+    document.getElementById('stats').innerHTML = '';
+    document.getElementById('bottom-controls').classList.remove('on');
+    document.getElementById('stream-controls').classList.add('on');
+    document.getElementById('search-box').classList.remove('on');
+    document.getElementById('hint').textContent = '';
   }
   document.getElementById('legend').classList.remove('on');
-  document.getElementById('search-box').classList.add('on');
   document.getElementById('back-btn').classList.remove('on');
-  document.getElementById('hint').textContent = 'CLICK TO INSPECT';
 }
 refreshHeader();
 
@@ -914,9 +1071,19 @@ function renderIpTimeline() {
 }
 
 // --- MAIN LOOP ---
+let _lastFrame = performance.now();
 function loop() {
+  const now = performance.now();
+  const dtMs = Math.min(100, now - _lastFrame);  // cap at 100ms to avoid huge jumps
+  _lastFrame = now;
+
   ctx.clearRect(0, 0, vw, vh);
   if (viewMode === 'ip_timeline') renderIpTimeline();
+  else if (mainView === 'stream') {
+    tickStream(dtMs);
+    updatePulses(dtMs / 1000);
+    renderStream();
+  }
   else if (mainView === 'ips') renderIpParticles();
   else renderTableParticles();
   requestAnimationFrame(loop);
@@ -953,6 +1120,7 @@ function selectIP(ip) {
   document.getElementById('search-box').classList.remove('on');
   document.getElementById('view-toggle').classList.add('hidden');
   document.getElementById('bottom-controls').classList.remove('on');
+  document.getElementById('stream-controls').classList.remove('on');
   document.getElementById('hint').textContent = 'CLICK BAR FOR SQL';
   closePanel();
 }
