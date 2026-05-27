@@ -1,19 +1,19 @@
 """
-map_fail_viz.py — multi-CSV die fail map visualizer with workbench
+map_fail_viz.py — multi-CSV die fail map visualizer (visual workbench)
 
-위 셀에서:
+위 셀에서 정의:
     CSV_PATHS = ["w1.csv", "w2.csv", ...]   # 또는 CSV_PATH = "data.csv"
     # 그다음 셀에 이 파일 내용 붙여넣고 실행
 
-출력 OUTPUT_HTML (기본 'fail_report.html') 한 파일에 다음이 들어감:
-    1. Overview wafer map (모든 데이터 합산)
+출력 OUTPUT_HTML (기본 'fail_report.html') 한 파일에:
+    1. Overview wafer map
     2. Pareto
     3. Per-group small multiples
-    4. **Workbench** — 라이브러리에서 wafer 를 드래그/클릭으로 가져와
-       워크벤치에 올리면 합쳐서 보여줌. SUM / MEAN / MAX 선택 가능.
-
-wafer 한 개의 정체는 (LOTID, waferseq, item, temp) 조합으로 정의됨
-(없는 칼럼은 자동으로 생략, 다 없으면 파일명으로 폴백).
+    4. Workbench
+       - 좌측: 각 wafer 의 썸네일(전체 fault map) + 이름
+       - 드래그/클릭으로 워크벤치로 '이동'
+       - 우측 상단: 합쳐진(SUM/MEAN/MAX) 컬럼별 wafer map
+       - 우측 하단: 활성 wafer 각각의 현재 컬럼 미니 플롯 (비교용)
 """
 
 # === CONFIG ===
@@ -41,6 +41,9 @@ except NameError: MAX_INTERACTIVE_COLS = None
 
 try: SKIP_TYPE_ROW
 except NameError: SKIP_TYPE_ROW = True
+
+try: SHOW_THUMBNAILS
+except NameError: SHOW_THUMBNAILS = True
 
 
 # === imports ===
@@ -77,9 +80,12 @@ def wafer_map(ax, xs, ys, values, title, vmax_log=None, point_size=None):
     return sc
 
 
-def fig_to_b64(fig):
+def fig_to_b64(fig, dpi=110, tight=True):
     buf = BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=110, facecolor="white")
+    if tight:
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi, facecolor="white")
+    else:
+        fig.savefig(buf, format="png", dpi=dpi, facecolor="black")
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
@@ -98,7 +104,6 @@ for path in CSV_PATHS:
     d["__source__"] = p.name
     print(f"  {p.name}: {len(d):,} rows × {len(d.columns)} cols")
     dfs.append(d)
-
 assert dfs, "no CSV files read"
 
 ref_cols = list(dfs[0].columns)
@@ -111,8 +116,7 @@ print(f"combined: {len(df):,} rows × {len(df.columns)} cols")
 
 # === detect columns ===
 cmap = {c.lower(): c for c in df.columns}
-x_col   = cmap["xdiepos"]
-y_col   = cmap["ydiepos"]
+x_col   = cmap["xdiepos"]; y_col = cmap["ydiepos"]
 lot_col  = cmap.get("lotid")
 wseq_col = cmap.get("waferseq")
 item_col = cmap.get("item")
@@ -189,15 +193,14 @@ def aggregate(sub):
     return g.reindex(pos_idx).fillna(0)
 
 
-# === per-wafer aggregation (workbench source units) ===
-# wafer 정체 = (LOTID, waferseq, item, temp) 중 존재하는 것들의 조합
+# === per-wafer aggregation ===
 entity_cols = [c for c in [lot_col, wseq_col, item_col, temp_col] if c]
 if not entity_cols:
     entity_cols = ["__source__"]
 print(f"  wafer entity keys: {entity_cols}")
 
 wafers = {}
-g_all = aggregate(df)   # 전체 합산 (static plot 용)
+g_all = aggregate(df)
 
 for keys, sub in df.groupby(entity_cols, dropna=False, sort=True):
     if not isinstance(keys, tuple):
@@ -209,10 +212,8 @@ for keys, sub in df.groupby(entity_cols, dropna=False, sort=True):
             s = "?"
         else:
             s = str(kval)
-        if kcol == wseq_col:
-            s = f"W{s}"
-        elif kcol == temp_col:
-            s = f"{s}\u00b0"
+        if kcol == wseq_col:    s = f"W{s}"
+        elif kcol == temp_col:  s = f"{s}\u00b0"
         label_parts.append(s)
     label = " · ".join(label_parts)
     wafers[wid] = {
@@ -223,7 +224,37 @@ for keys, sub in df.groupby(entity_cols, dropna=False, sort=True):
 print(f"  enumerated {len(wafers)} wafer entries")
 
 
-# === static plots using overall aggregate ===
+# === thumbnails (per wafer, total-fail map) ===
+def make_thumb(values, vmax_log, s_pts, size_inch=1.55, dpi=72):
+    fig = plt.figure(figsize=(size_inch, size_inch), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1])
+    v = np.log1p(np.asarray(values, dtype=float))
+    ax.scatter(xs_full, ys_full, c=v, s=s_pts, marker="s",
+               cmap="inferno", vmin=0, vmax=vmax_log, edgecolors="none")
+    ax.set_aspect("equal")
+    ax.set_xlim(xs_full.min() - 1, xs_full.max() + 1)
+    ax.set_ylim(ys_full.min() - 1, ys_full.max() + 1)
+    ax.axis("off"); ax.set_facecolor("black")
+    return fig_to_b64(fig, dpi=dpi, tight=False)
+
+if SHOW_THUMBNAILS:
+    print(f"rendering {len(wafers)} thumbnails...")
+    # 공통 vmax (모든 wafer 비교 가능하도록)
+    max_total = max((float(w["agg"].sum(axis=1).max()) for w in wafers.values()),
+                    default=1.0)
+    thumb_vmax_log = float(np.log1p(max_total or 1))
+    # 마커 크기 자동
+    thumb_px = 1.55 * 72
+    thumb_s = max(3, min(40, int((thumb_px / max(1.0, np.sqrt(n_pos))) ** 2)))
+    for wid, w in wafers.items():
+        total = w["agg"].sum(axis=1).values
+        w["thumb"] = make_thumb(total, thumb_vmax_log, thumb_s)
+else:
+    for w in wafers.values():
+        w["thumb"] = ""
+
+
+# === static plots ===
 plot_b64 = {}
 group_plots = []
 
@@ -276,7 +307,7 @@ for g_name, items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
     group_plots.append((g_name, n_all, fig_to_b64(fig)))
 
 
-# === build workbench JSON ===
+# === workbench JSON ===
 if MAX_INTERACTIVE_COLS is not None and len(fail_cols) > MAX_INTERACTIVE_COLS:
     selected_cols = list(totals.head(MAX_INTERACTIVE_COLS).index)
     print(f"  workbench: top {len(selected_cols)} / {len(fail_cols)} cols")
@@ -284,7 +315,6 @@ else:
     selected_cols = fail_cols
     print(f"  workbench: all {len(selected_cols)} cols included")
 
-# 각 wafer 의 각 col 에 대해 원본 값(정수에 가까운 fail count) 저장 — JS 에서 합산
 def encode_arr(arr):
     return [int(v) if v == int(v) else round(float(v), 2)
             for v in np.nan_to_num(arr, nan=0.0)]
@@ -298,6 +328,7 @@ for wid, w in wafers.items():
     wafers_json[wid] = {
         "label": w["label"],
         "nRows": int(w["n_rows"]),
+        "thumb": w["thumb"],
         "data": data,
     }
 
@@ -305,6 +336,17 @@ group_options_interactive = {}
 for c in selected_cols:
     g, _ = parse_group(c)
     group_options_interactive.setdefault(g, []).append(c)
+
+# 미니 플롯용 vmax (개별 wafer 단일 값의 최대)
+mini_vmax = 0.0
+for w in wafers.values():
+    g = w["agg"]
+    if selected_cols:
+        m = float(g[selected_cols].to_numpy().max())
+        if m > mini_vmax: mini_vmax = m
+    mt = float(g.sum(axis=1).max())
+    if mt > mini_vmax: mini_vmax = mt
+mini_vmax_log = float(np.log1p(mini_vmax or 1))
 
 
 # === build HTML ===
@@ -316,15 +358,14 @@ js_data = {
     "YS": [int(v) for v in ys_full],
     "GROUPS": group_options_interactive,
     "PSIZE": max(4, POINT_SIZE // 2),
+    "MINI_VMAX": mini_vmax_log,
 }
 
 sources_str = ", ".join(Path(p).name for p in CSV_PATHS)
 meta_html = (
     f"files ({len(CSV_PATHS)}): {sources_str}<br>"
-    f"rows: {len(df):,} &middot; "
-    f"die positions: {n_pos:,} &middot; "
-    f"fail cols: {len(fail_cols)} &middot; "
-    f"groups: {len(groups)} &middot; "
+    f"rows: {len(df):,} &middot; die positions: {n_pos:,} &middot; "
+    f"fail cols: {len(fail_cols)} &middot; groups: {len(groups)} &middot; "
     f"wafers: {len(wafers)}"
 )
 
@@ -338,21 +379,20 @@ html = ["""<!doctype html>
   h1{color:#ffb000;font-size:20px;border-bottom:1px solid #2c3645;padding-bottom:10px;
      letter-spacing:.05em}
   h2{color:#ffb000;font-size:13px;margin-top:36px;letter-spacing:.05em;text-transform:uppercase}
-  h3{color:#8b949e;font-size:12px;margin-top:24px;font-weight:500}
+  h3{color:#8b949e;font-size:11px;margin:18px 0 8px;font-weight:500;
+     text-transform:uppercase;letter-spacing:.06em}
   .meta{color:#8b949e;font-size:12px;font-family:ui-monospace,SFMono-Regular,monospace;
         margin-top:8px;line-height:1.7}
-  img{display:block;max-width:100%;background:#fff;border-radius:6px;margin:8px 0}
+  img.staticImg{display:block;max-width:100%;background:#fff;border-radius:6px;margin:8px 0}
   nav{position:sticky;top:0;background:#0c1118;border-bottom:1px solid #2c3645;
       padding:8px 0;margin:0 0 16px;z-index:20}
   nav a{color:#8b949e;text-decoration:none;font-size:12px;margin-right:18px}
   nav a:hover{color:#ffb000}
   .note{color:#8b949e;font-size:11px;margin:4px 0 12px}
 
-  /* workbench */
-  .wb-grid{display:grid;grid-template-columns:300px 1fr;gap:16px;margin-top:12px}
+  /* workbench grid */
+  .wb-grid{display:grid;grid-template-columns:320px 1fr;gap:16px;margin-top:12px}
   .lib,.bench{background:#161d28;border:1px solid #2c3645;border-radius:6px;padding:14px}
-  .lib h3,.bench h3{margin-top:0;color:#ffb000;font-size:11px;text-transform:uppercase;
-                    letter-spacing:.08em}
   #libFilter{width:100%;background:#0c1118;border:1px solid #2c3645;color:#e6edf3;
              padding:6px 8px;border-radius:4px;font-size:12px;margin-bottom:6px;box-sizing:border-box}
   .lib-actions{display:flex;gap:6px;margin-bottom:10px}
@@ -360,27 +400,41 @@ html = ["""<!doctype html>
                       padding:5px 8px;border-radius:4px;font-size:11px;cursor:pointer;
                       font-family:ui-monospace,monospace}
   .lib-actions button:hover{color:#ffb000;border-color:#ffb000}
-  .wafer-list{max-height:620px;overflow-y:auto;padding-right:4px}
-  .wafer-card{background:#0c1118;border:1px solid #2c3645;border-radius:4px;
-              padding:8px 10px;margin:4px 0;cursor:grab;font-size:11px;
-              transition:border-color .12s}
-  .wafer-card:hover{border-color:#ffb000}
-  .wafer-card.active{border-color:#ffb000;background:#1a2230}
-  .wafer-card.dragging{opacity:.5}
-  .wafer-card .title{color:#e6edf3;font-weight:500;line-height:1.4}
-  .wafer-card .meta{color:#8b949e;font-size:10px;margin-top:2px;font-family:ui-monospace,monospace}
 
-  .drop-zone{min-height:54px;border:2px dashed #2c3645;border-radius:4px;padding:8px;
-             display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;
+  .wafer-list{max-height:780px;overflow-y:auto;padding-right:4px}
+  .wafer-card{display:flex;gap:10px;align-items:center;background:#0c1118;
+              border:1px solid #2c3645;border-radius:4px;padding:6px;margin:4px 0;
+              cursor:grab;transition:border-color .12s}
+  .wafer-card:hover{border-color:#ffb000}
+  .wafer-card.dragging{opacity:.4}
+  .wafer-card.hidden{display:none}
+  .wafer-card img.thumb{width:54px;height:54px;border-radius:3px;flex-shrink:0;
+                        image-rendering:pixelated;background:#000}
+  .wafer-card .info{flex:1;min-width:0}
+  .wafer-card .info .title{font-size:11px;color:#e6edf3;font-weight:500;line-height:1.35;
+                           word-break:break-word}
+  .wafer-card .info .meta{font-size:10px;color:#8b949e;margin-top:3px;
+                          font-family:ui-monospace,monospace}
+
+  .drop-zone{min-height:96px;border:2px dashed #2c3645;border-radius:5px;padding:10px;
+             display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start;
              transition:all .12s}
   .drop-zone.over{border-color:#ffb000;background:#1a2230}
-  .drop-zone:empty::before{content:'\2014  드래그하거나 카드 클릭으로 wafer 추가  \2014';
+  .drop-zone.empty::before{content:'\2014  드래그하거나 카드 클릭으로 wafer 추가  \2014';
                            color:#4b5563;font-size:11px;margin:auto;
                            font-family:ui-monospace,monospace}
-  .chip{background:#2c3645;color:#e6edf3;padding:4px 8px;border-radius:4px;font-size:11px;
-        display:inline-flex;gap:6px;align-items:center;font-family:ui-monospace,monospace}
-  .chip .x{cursor:pointer;opacity:.5;font-weight:bold}
-  .chip .x:hover{opacity:1;color:#ff6b6b}
+  .dz-tile{background:#0c1118;border:1px solid #ffb000;border-radius:5px;padding:6px;
+           display:flex;flex-direction:column;align-items:center;gap:4px;
+           position:relative;width:84px}
+  .dz-tile img{width:64px;height:64px;border-radius:3px;image-rendering:pixelated;background:#000}
+  .dz-tile .lbl{font-size:9px;color:#e6edf3;font-family:ui-monospace,monospace;
+                text-align:center;line-height:1.2;max-width:74px;
+                white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .dz-tile .x{position:absolute;top:-7px;right:-7px;background:#2c3645;color:#e6edf3;
+              width:18px;height:18px;border-radius:50%;text-align:center;
+              font-size:12px;line-height:18px;cursor:pointer;font-weight:bold;
+              border:1px solid #ffb000}
+  .dz-tile .x:hover{background:#ff6b6b}
 
   .controls{display:flex;gap:14px;align-items:flex-end;margin:14px 0;flex-wrap:wrap}
   .ctl label{display:block;font-size:10px;color:#8b949e;text-transform:uppercase;
@@ -392,6 +446,16 @@ html = ["""<!doctype html>
   .stats{color:#8b949e;font-size:11px;font-family:ui-monospace,monospace;
          margin-top:8px;padding:10px 14px;background:#0c1118;border-radius:4px;
          border:1px solid #2c3645}
+
+  /* mini plots */
+  .mini-section{margin-top:18px;padding-top:14px;border-top:1px solid #2c3645}
+  .mini-plots{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
+  .mini-plot{background:#fff;border-radius:4px;overflow:hidden}
+  .mini-plot .mp-title{background:#161d28;color:#e6edf3;font-size:10px;padding:5px 8px;
+                       font-family:ui-monospace,monospace;border-bottom:1px solid #2c3645;
+                       white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mini-plot .mp-plot{height:200px}
+  .mini-empty{color:#4b5563;font-size:11px;font-family:ui-monospace,monospace;padding:12px}
 </style></head>
 <body>
 <h1>FAIL MAP REPORT</h1>"""]
@@ -406,33 +470,33 @@ html.append("""
 """)
 
 html.append("<h2 id='overview'>1. Overview &mdash; total fail per die</h2>")
-html.append("<div class='note'>모든 입력 파일과 모든 wafer 합산. color = log(1 + fail).</div>")
-html.append(f"<img src='data:image/png;base64,{plot_b64['overview']}'>")
+html.append("<div class='note'>모든 입력 파일·모든 wafer 합산. color = log(1 + fail).</div>")
+html.append(f"<img class='staticImg' src='data:image/png;base64,{plot_b64['overview']}'>")
 
 html.append("<h2 id='pareto'>2. Pareto &mdash; top fail columns</h2>")
-html.append(f"<img src='data:image/png;base64,{plot_b64['pareto']}'>")
+html.append(f"<img class='staticImg' src='data:image/png;base64,{plot_b64['pareto']}'>")
 
 html.append("<h2 id='groups'>3. Per-group small multiples</h2>")
 for g_name, n_all, b64 in group_plots:
     html.append(f"<h3>group '{g_name}' &mdash; {n_all} columns</h3>")
-    html.append(f"<img src='data:image/png;base64,{b64}'>")
+    html.append(f"<img class='staticImg' src='data:image/png;base64,{b64}'>")
 
 html.append("""
 <h2 id='workbench'>4. Workbench</h2>
-<div class='note'>왼쪽 라이브러리에서 wafer 카드를 워크벤치로 드래그하거나 클릭해서 추가하세요. 여러 개 올리면 SUM / MEAN / MAX 로 합쳐서 보여줍니다.</div>
+<div class='note'>왼쪽 라이브러리의 wafer(썸네일은 전체 fault 합산)를 드래그하거나 클릭해서 워크벤치로 옮기세요. 워크벤치에 올라간 wafer 들은 SUM/MEAN/MAX 로 합쳐서 큰 plot 으로, 그리고 아래쪽에 wafer 별 미니 plot 으로 같이 보여줍니다.</div>
 <div class="wb-grid">
   <div class="lib">
-    <h3>Library &mdash; available wafers</h3>
+    <h3>Library</h3>
     <input type="search" id="libFilter" placeholder="filter (label 검색)...">
     <div class="lib-actions">
-      <button id="addAll">+ add all visible</button>
+      <button id="addAll">+ all visible</button>
       <button id="clearAll">clear bench</button>
     </div>
     <div class="wafer-list" id="waferList"></div>
   </div>
   <div class="bench">
-    <h3>Workbench &mdash; drop wafers here</h3>
-    <div class="drop-zone" id="dropZone"></div>
+    <h3>Workbench</h3>
+    <div class="drop-zone empty" id="dropZone"></div>
     <div class="controls">
       <div class="ctl"><label>operation</label><select id="opSel">
         <option value="sum">SUM</option>
@@ -444,6 +508,12 @@ html.append("""
     </div>
     <div id="plot"></div>
     <div class="stats" id="stats">(워크벤치가 비어있음)</div>
+    <div class="mini-section">
+      <h3>Individual wafer maps · current column</h3>
+      <div class="mini-plots" id="miniPlots">
+        <div class="mini-empty">wafer 를 워크벤치에 올리면 여기에 개별 plot 이 나타납니다.</div>
+      </div>
+    </div>
   </div>
 </div>
 """)
@@ -451,7 +521,8 @@ html.append("""
 html.append("<script>")
 html.append("const D = " + json.dumps(js_data, separators=(",", ":")) + ";")
 html.append(r"""
-const WAFERS = D.WAFERS, XS = D.XS, YS = D.YS, GROUPS = D.GROUPS, PSIZE = D.PSIZE;
+const WAFERS = D.WAFERS, XS = D.XS, YS = D.YS, GROUPS = D.GROUPS,
+      PSIZE = D.PSIZE, MINI_VMAX = D.MINI_VMAX;
 
 const waferList = document.getElementById('waferList');
 const dropZone  = document.getElementById('dropZone');
@@ -460,35 +531,39 @@ const colSel    = document.getElementById('colSel');
 const opSel     = document.getElementById('opSel');
 const statsEl   = document.getElementById('stats');
 const filterEl  = document.getElementById('libFilter');
+const miniBox   = document.getElementById('miniPlots');
 
 const active = new Set();
 
-// build library cards
+// library cards
 Object.entries(WAFERS).forEach(([wid, w]) => {
   const card = document.createElement('div');
   card.className = 'wafer-card';
   card.draggable = true;
   card.dataset.id = wid;
   card.dataset.search = w.label.toLowerCase();
-  card.innerHTML = '<div class="title">' + w.label + '</div>' +
-                   '<div class="meta">' + w.nRows.toLocaleString() + ' rows</div>';
+  const thumbHtml = w.thumb
+    ? `<img class="thumb" src="data:image/png;base64,${w.thumb}">`
+    : `<div class="thumb" style="background:#222"></div>`;
+  card.innerHTML = thumbHtml +
+                   `<div class="info"><div class="title">${w.label}</div>` +
+                   `<div class="meta">${w.nRows.toLocaleString()} rows</div></div>`;
   card.addEventListener('dragstart', e => {
     e.dataTransfer.setData('text/plain', wid);
     card.classList.add('dragging');
   });
   card.addEventListener('dragend', () => card.classList.remove('dragging'));
-  card.addEventListener('click', () => toggleWafer(wid));
+  card.addEventListener('click', () => addWafer(wid));
   waferList.appendChild(card);
 });
 
-// build groups & cols
+// group / col dropdowns
 const groupNames = Object.keys(GROUPS).sort();
 [['__ALL__','\u2014 all columns \u2014'],
  ['__TOTAL__','\u2014 total only \u2014'],
  ...groupNames.map(g => [g, g])].forEach(([v, t]) => {
   const o = document.createElement('option');
-  o.value = v; o.textContent = t;
-  groupSel.appendChild(o);
+  o.value = v; o.textContent = t; groupSel.appendChild(o);
 });
 
 function refreshCols() {
@@ -509,7 +584,7 @@ function refreshCols() {
     o.textContent = c === '__TOTAL__' ? 'TOTAL (sum of all cols)' : c;
     colSel.appendChild(o);
   });
-  draw();
+  drawAll();
 }
 
 // drag-drop
@@ -522,58 +597,69 @@ dropZone.addEventListener('drop', e => {
   if (wid) addWafer(wid);
 });
 
-function toggleWafer(wid) {
-  if (active.has(wid)) removeWafer(wid);
-  else addWafer(wid);
-}
 function addWafer(wid) {
   if (active.has(wid) || !WAFERS[wid]) return;
   active.add(wid);
-  document.querySelector(`.wafer-card[data-id="${wid}"]`)?.classList.add('active');
-  renderChips(); draw();
+  updateLibraryVisibility();
+  renderTiles();
+  drawAll();
 }
 function removeWafer(wid) {
   active.delete(wid);
-  document.querySelector(`.wafer-card[data-id="${wid}"]`)?.classList.remove('active');
-  renderChips(); draw();
+  updateLibraryVisibility();
+  renderTiles();
+  drawAll();
 }
-function renderChips() {
+
+function renderTiles() {
   dropZone.innerHTML = '';
+  if (active.size === 0) {
+    dropZone.classList.add('empty');
+    return;
+  }
+  dropZone.classList.remove('empty');
   active.forEach(wid => {
-    const chip = document.createElement('div');
-    chip.className = 'chip';
-    chip.innerHTML = '<span>' + WAFERS[wid].label + '</span><span class="x">\u00d7</span>';
-    chip.querySelector('.x').addEventListener('click', () => removeWafer(wid));
-    dropZone.appendChild(chip);
+    const w = WAFERS[wid];
+    const tile = document.createElement('div');
+    tile.className = 'dz-tile';
+    const thumbHtml = w.thumb
+      ? `<img src="data:image/png;base64,${w.thumb}">`
+      : `<div style="width:64px;height:64px;background:#222;border-radius:3px"></div>`;
+    tile.innerHTML = `<span class="x" title="remove">\u00d7</span>` +
+                     thumbHtml +
+                     `<span class="lbl" title="${w.label}">${w.label}</span>`;
+    tile.querySelector('.x').addEventListener('click', () => removeWafer(wid));
+    dropZone.appendChild(tile);
   });
 }
 
-// filter
-filterEl.addEventListener('input', () => {
+function updateLibraryVisibility() {
   const q = filterEl.value.toLowerCase();
   document.querySelectorAll('.wafer-card').forEach(card => {
-    card.style.display = card.dataset.search.includes(q) ? '' : 'none';
+    const inBench = active.has(card.dataset.id);
+    const matches = card.dataset.search.includes(q);
+    card.classList.toggle('hidden', inBench || !matches);
   });
-});
+}
 
-// quick actions
+filterEl.addEventListener('input', updateLibraryVisibility);
+
 document.getElementById('addAll').addEventListener('click', () => {
   document.querySelectorAll('.wafer-card').forEach(card => {
-    if (card.style.display !== 'none') addWafer(card.dataset.id);
+    if (!card.classList.contains('hidden')) addWafer(card.dataset.id);
   });
 });
 document.getElementById('clearAll').addEventListener('click', () => {
-  active.forEach(wid => document.querySelector(`.wafer-card[data-id="${wid}"]`)?.classList.remove('active'));
-  active.clear(); renderChips(); draw();
+  active.clear();
+  updateLibraryVisibility(); renderTiles(); drawAll();
 });
 
-// draw
+// ---- aggregation ----
 function aggregateActive() {
-  const col = colSel.value;
-  const op  = opSel.value;
+  const col = colSel.value, op = opSel.value;
   const N = XS.length;
-  const out = new Array(N).fill(0);
   if (active.size === 0) return null;
+  const out = new Array(N).fill(0);
   let cnt = 0;
   for (const wid of active) {
     const arr = WAFERS[wid].data[col];
@@ -591,16 +677,15 @@ function aggregateActive() {
   return out;
 }
 
-function draw() {
+// ---- combined draw ----
+function drawCombined() {
   const values = aggregateActive();
   if (!values) {
     Plotly.purge('plot');
     statsEl.textContent = '(워크벤치가 비어있음)';
     return;
   }
-  const col = colSel.value;
-  const op  = opSel.value;
-  // values 는 원본 스케일; log1p 로 색깔
+  const col = colSel.value, op = opSel.value;
   const colors = values.map(v => Math.log1p(Math.max(0, v)));
   const vmax = Math.max(1, ...colors);
 
@@ -609,18 +694,15 @@ function draw() {
     if (v > 0) { nz++; sum += v; }
     if (v > mx) mx = v;
   }
-
   statsEl.textContent =
-    'wafers: ' + active.size +
-    '   \u00b7   op: ' + op.toUpperCase() +
+    'wafers: ' + active.size + '   \u00b7   op: ' + op.toUpperCase() +
     '   \u00b7   column: ' + col +
     '   \u00b7   die with fails: ' + nz.toLocaleString() + ' / ' + values.length.toLocaleString() +
     '   \u00b7   total: ' + Math.round(sum).toLocaleString() +
     '   \u00b7   max per die: ' + Math.round(mx).toLocaleString();
 
-  const trace = {
-    x: XS, y: YS,
-    mode: 'markers', type: 'scattergl',
+  Plotly.react('plot', [{
+    x: XS, y: YS, mode: 'markers', type: 'scattergl',
     marker: {
       color: colors, colorscale: 'Inferno',
       size: PSIZE, symbol: 'square',
@@ -628,21 +710,63 @@ function draw() {
       colorbar: { title: 'log1p(fail)', thickness: 14 }
     },
     hovertemplate: 'x=%{x}, y=%{y}<br>log1p=%{marker.color:.2f}<extra></extra>'
-  };
-  const layout = {
-    title: { text: active.size + ' wafer' + (active.size > 1 ? 's' : '') + ' · ' + op + ' · ' + col, font: { size: 13 } },
+  }], {
+    title: { text: active.size + ' wafer' + (active.size > 1 ? 's' : '') + ' \u00b7 ' + op + ' \u00b7 ' + col, font: { size: 13 } },
     xaxis: { scaleanchor: 'y', showgrid: false, zeroline: false },
     yaxis: { showgrid: false, zeroline: false },
-    height: 680,
+    height: 620,
     margin: { l: 40, r: 40, t: 50, b: 40 },
     plot_bgcolor: '#fafafa', paper_bgcolor: '#fff'
-  };
-  Plotly.react('plot', [trace], layout, { displaylogo: false, responsive: true });
+  }, { displaylogo: false, responsive: true });
 }
 
+// ---- mini plots ----
+function drawMinis() {
+  miniBox.innerHTML = '';
+  if (active.size === 0) {
+    miniBox.innerHTML = '<div class="mini-empty">wafer 를 워크벤치에 올리면 여기에 개별 plot 이 나타납니다.</div>';
+    return;
+  }
+  const col = colSel.value;
+  active.forEach(wid => {
+    const w = WAFERS[wid];
+    const arr = w.data[col];
+    if (!arr) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'mini-plot';
+    const t = document.createElement('div');
+    t.className = 'mp-title';
+    t.title = w.label;
+    t.textContent = w.label;
+    const p = document.createElement('div');
+    p.className = 'mp-plot';
+    wrap.appendChild(t); wrap.appendChild(p);
+    miniBox.appendChild(wrap);
+
+    const colors = arr.map(v => Math.log1p(Math.max(0, v)));
+    Plotly.newPlot(p, [{
+      x: XS, y: YS, mode: 'markers', type: 'scattergl',
+      marker: {
+        color: colors, colorscale: 'Inferno',
+        size: Math.max(2, PSIZE / 3), symbol: 'square',
+        cmin: 0, cmax: MINI_VMAX, showscale: false
+      },
+      hovertemplate: 'x=%{x}, y=%{y}<br>log1p=%{marker.color:.2f}<extra></extra>'
+    }], {
+      xaxis: { scaleanchor: 'y', showgrid: false, zeroline: false, visible: false },
+      yaxis: { showgrid: false, zeroline: false, visible: false },
+      margin: { l: 4, r: 4, t: 4, b: 4 },
+      paper_bgcolor: '#fff', plot_bgcolor: '#fafafa'
+    }, { displayModeBar: false, responsive: true, staticPlot: false });
+  });
+}
+
+function drawAll() { drawCombined(); drawMinis(); }
+
 groupSel.addEventListener('change', refreshCols);
-colSel.addEventListener('change', draw);
-opSel.addEventListener('change', draw);
+colSel.addEventListener('change', drawAll);
+opSel.addEventListener('change', drawAll);
+
 refreshCols();
 """)
 html.append("</script></body></html>")
@@ -651,4 +775,4 @@ Path(OUTPUT_HTML).write_text("\n".join(html), encoding="utf-8")
 size_mb = Path(OUTPUT_HTML).stat().st_size / 1024 / 1024
 print(f"\nHTML saved -> {OUTPUT_HTML}  ({size_mb:.1f} MB)")
 if size_mb > 100:
-    print("  * 용량 큼. MAX_INTERACTIVE_COLS = 100 같이 제한 가능.")
+    print("  * 용량 큼. MAX_INTERACTIVE_COLS = 100 등으로 제한 가능.")
