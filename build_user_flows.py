@@ -148,6 +148,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .bottom-controls button:hover { border-color: var(--amber); color: var(--amber); }
   .bottom-controls button.active { color: var(--amber); border-color: var(--amber); background: rgba(232,160,74,0.08); }
+  .bottom-controls input {
+    background: var(--bg-2); border: 1px solid var(--line);
+    color: var(--text); font-family: inherit;
+    font-size: 11px; padding: 9px 12px; width: 240px;
+    outline: none;
+  }
+  .bottom-controls input:focus { border-color: var(--amber); }
 
   .tooltip {
     position: fixed; z-index: 7; background: var(--bg-2);
@@ -310,6 +317,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="bottom-controls" id="stream-controls" style="left: 28px;">
+  <input id="stream-table-input" list="stream-table-list" placeholder="select table..." />
+  <datalist id="stream-table-list"></datalist>
   <button id="stream-play">⏸ PAUSE</button>
   <button id="stream-speed-100" class="active">100×</button>
   <button id="stream-speed-1000">1000×</button>
@@ -487,113 +496,185 @@ let streamCursor = 0;
 let streamTime = GLOBAL_TMIN;
 let streamPlaying = true;
 let streamSpeed = 100;
-const activePulses = [];
-const ipPositions = {};
+let activePulses = [];
 
-function computeIpPositions() {
-  const n = ipList.length;
-  if (n === 0) return;
-  const topReserved = 160;
-  const bottomReserved = 90;
-  const w = vw;
-  const h = Math.max(100, vh - topReserved - bottomReserved);
-  const cols = Math.max(1, Math.ceil(Math.sqrt(n * (w / h))));
-  const rows = Math.ceil(n / cols);
-  const cellW = w / cols;
-  const cellH = h / rows;
-  ipList.forEach((d, i) => {
-    const col = i % cols;
-    const row = Math.floor(i / cols);
-    ipPositions[d.ip] = {
-      x: cellW * (col + 0.5),
-      y: topReserved + cellH * (row + 0.5),
-    };
-  });
+// table-specific state
+let selectedStreamTable = null;
+let streamTableCalls = [];
+let fnOrder = [];        // function names sorted by frequency (top first)
+let fnLanes = {};        // function name -> lane index
+
+const STREAM_TOP = 160;
+const STREAM_BOT = 90;
+const STREAM_LEFT = 180;
+const STREAM_RIGHT = 40;
+const STREAM_WINDOW_SEC = 3600;  // 1 hour of data visible across the lane area
+
+function streamLaneHeight() {
+  const h = vh - STREAM_TOP - STREAM_BOT;
+  return h / Math.max(1, fnOrder.length || 1);
 }
-computeIpPositions();
-window.addEventListener('resize', computeIpPositions);
+function streamLaneY(fn) {
+  const idx = fnLanes[fn] ?? 0;
+  const laneH = streamLaneHeight();
+  return STREAM_TOP + laneH * idx + laneH / 2;
+}
+function streamGetX(callTime) {
+  const dataSec = (streamTime - callTime) / 1000;
+  const widthPx = vw - STREAM_LEFT - STREAM_RIGHT;
+  return (vw - STREAM_RIGHT) - (dataSec / STREAM_WINDOW_SEC) * widthPx;
+}
+
+function selectStreamTable(name) {
+  if (!name || !byTable[name]) return;
+  selectedStreamTable = name;
+  streamTableCalls = sortedCalls.filter(c => (c.tables || []).includes(name));
+  const fnCount = {};
+  for (const c of streamTableCalls) fnCount[c.function] = (fnCount[c.function] || 0) + 1;
+  fnOrder = Object.entries(fnCount).sort((a, b) => b[1] - a[1]).map(e => e[0]);
+  fnLanes = {};
+  fnOrder.forEach((f, i) => fnLanes[f] = i);
+  streamCursor = 0;
+  streamTime = streamTableCalls.length ? streamTableCalls[0]._start : GLOBAL_TMIN;
+  activePulses = [];
+}
+
+function populateTableSelect() {
+  const dl = document.getElementById('stream-table-list');
+  dl.innerHTML = '';
+  for (const t of tableList) {
+    const opt = document.createElement('option');
+    opt.value = t.table;
+    opt.label = `${t.table} (${t.count})`;
+    dl.appendChild(opt);
+  }
+}
+populateTableSelect();
+
+document.getElementById('stream-table-input').addEventListener('change', e => {
+  selectStreamTable(e.target.value.trim());
+});
 
 function streamReset() {
-  streamTime = GLOBAL_TMIN;
-  streamCursor = 0;
-  activePulses.length = 0;
+  if (selectedStreamTable) {
+    streamCursor = 0;
+    streamTime = streamTableCalls.length ? streamTableCalls[0]._start : GLOBAL_TMIN;
+    activePulses = [];
+  }
 }
 
 function tickStream(dtMs) {
-  if (!streamPlaying) return;
+  if (!streamPlaying || !selectedStreamTable) return;
   streamTime += dtMs * streamSpeed;
-  if (streamTime >= GLOBAL_TMAX) {
-    streamReset();
-    return;
-  }
-  while (streamCursor < sortedCalls.length && sortedCalls[streamCursor]._start <= streamTime) {
-    const c = sortedCalls[streamCursor];
-    const pos = ipPositions[c.ip];
-    if (pos) {
-      activePulses.push({
-        x: pos.x + (Math.random() - 0.5) * 10,
-        y: pos.y + (Math.random() - 0.5) * 10,
-        age: 0, maxAge: 1.2,
-        cache: c.cache,
-      });
-    }
+  if (streamTime >= GLOBAL_TMAX) { streamReset(); return; }
+  // spawn newly-arrived calls
+  while (streamCursor < streamTableCalls.length && streamTableCalls[streamCursor]._start <= streamTime) {
+    activePulses.push({ call: streamTableCalls[streamCursor] });
     streamCursor++;
   }
-}
-
-function updatePulses(dtSec) {
-  for (let i = activePulses.length - 1; i >= 0; i--) {
-    activePulses[i].age += dtSec;
-    if (activePulses[i].age > activePulses[i].maxAge) activePulses.splice(i, 1);
-  }
+  // drop pulses that flowed off the left
+  activePulses = activePulses.filter(p => streamGetX(p.call._start) > STREAM_LEFT - 30);
 }
 
 function renderStream() {
-  // base IP dots (always visible, dim)
-  ctx.fillStyle = 'rgba(245,241,232,0.12)';
-  for (const pos of Object.values(ipPositions)) {
-    ctx.beginPath();
-    ctx.arc(pos.x, pos.y, 1.8, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // pulses
-  for (const p of activePulses) {
-    const t = p.age / p.maxAge;
-    const radius = 3 + t * 26;
-    const alpha = (1 - t) * 0.7;
-    let r, g, b;
-    if (p.cache === 'hit') { r = 232; g = 160; b = 74; }
-    else if (p.cache === 'miss') { r = 94; g = 192; b = 192; }
-    else { r = 180; g = 180; b = 180; }
-    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-    ctx.stroke();
-    // filled core
-    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha * 0.5})`;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // current time (large center top)
+  // header: clock
   const d = new Date(streamTime);
   const pad = n => String(n).padStart(2, '0');
   const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  const dateStr = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} · ${streamSpeed}× · ${activePulses.length} active`;
+  const subStr = selectedStreamTable
+    ? `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} · ${streamSpeed}× · TABLE: ${selectedStreamTable} (${streamTableCalls.length} calls, ${fnOrder.length} fns)`
+    : 'CHOOSE A TABLE BELOW';
 
   ctx.save();
   ctx.fillStyle = 'rgba(245,241,232,0.85)';
   ctx.font = '300 56px Fraunces, serif';
   ctx.textAlign = 'center';
-  ctx.fillText(timeStr, vw/2, 100);
-
-  ctx.fillStyle = 'rgba(139,134,128,0.8)';
+  ctx.fillText(timeStr, vw/2, 90);
+  ctx.fillStyle = 'rgba(139,134,128,0.85)';
   ctx.font = '10px JetBrains Mono';
-  ctx.fillText(dateStr, vw/2, 122);
+  ctx.fillText(subStr, vw/2, 112);
   ctx.restore();
+
+  if (!selectedStreamTable || !fnOrder.length) {
+    // progress bar still
+    const progress = (streamTime - GLOBAL_TMIN) / (GLOBAL_TMAX - GLOBAL_TMIN || 1);
+    ctx.fillStyle = 'rgba(232,160,74,0.6)';
+    ctx.fillRect(0, vh - 3, vw * progress, 3);
+    return;
+  }
+
+  // lane backgrounds + labels
+  const laneH = streamLaneHeight();
+  ctx.textAlign = 'left';
+  for (let i = 0; i < fnOrder.length; i++) {
+    const y = STREAM_TOP + laneH * i;
+    if (i % 2 === 0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.02)';
+      ctx.fillRect(STREAM_LEFT, y, vw - STREAM_LEFT - STREAM_RIGHT, laneH);
+    }
+    ctx.fillStyle = '#8b8680';
+    ctx.font = '10px JetBrains Mono';
+    let lbl = shortFn(fnOrder[i]);
+    if (lbl.length > 22) lbl = lbl.slice(0, 21) + '…';
+    ctx.fillText(lbl, 14, y + laneH/2 + 4);
+  }
+
+  // playhead (right edge = now)
+  ctx.strokeStyle = 'rgba(232,160,74,0.35)';
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath();
+  ctx.moveTo(vw - STREAM_RIGHT, STREAM_TOP);
+  ctx.lineTo(vw - STREAM_RIGHT, vh - STREAM_BOT);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // pulses
+  let hoverP = null;
+  for (const p of activePulses) {
+    const c = p.call;
+    const x = streamGetX(c._start);
+    const y = streamLaneY(c.function);
+    if (x < STREAM_LEFT || x > vw - STREAM_RIGHT + 4) continue;
+
+    let r, g, b;
+    if (c.cache === 'hit') { r = 232; g = 160; b = 74; }
+    else if (c.cache === 'miss') { r = 94; g = 192; b = 192; }
+    else { r = 180; g = 180; b = 180; }
+
+    // fade by horizontal position (newer = brighter)
+    const widthPx = vw - STREAM_LEFT - STREAM_RIGHT;
+    const norm = ((vw - STREAM_RIGHT) - x) / widthPx;  // 0 = right (new), 1 = left (old)
+    const alpha = 0.85 - norm * 0.5;
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    const d2 = Math.hypot(mouseX - x, mouseY - y);
+    if (d2 < 9 && !hoverP) hoverP = { call: c, x, y };
+  }
+
+  // tooltip
+  const tt = document.getElementById('tooltip');
+  if (hoverP) {
+    const c = hoverP.call;
+    document.getElementById('tt-ip').textContent = c.function || '(unknown)';
+    const meta = [
+      `${pad(new Date(c._start).getHours())}:${pad(new Date(c._start).getMinutes())}:${pad(new Date(c._start).getSeconds())} · ${c.ip}:${c.port}`,
+      c.cache ? `CACHE ${c.cache.toUpperCase()}${c.cache_key ? ' · '+c.cache_key : ''}` : 'NO CACHE',
+      c.duration_ms != null ? `duration ${c.duration_ms.toFixed(0)}ms` : '',
+      c.n_sqls ? `${c.n_sqls} sql` : '',
+    ].filter(Boolean).join('\n');
+    document.getElementById('tt-meta').textContent = meta;
+    document.getElementById('tt-meta').style.whiteSpace = 'pre-line';
+    tt.style.display = 'block';
+    tt.style.left = (mouseX + 14) + 'px';
+    tt.style.top = (mouseY + 14) + 'px';
+    canvas.style.cursor = 'pointer';
+  } else {
+    tt.style.display = 'none';
+    canvas.style.cursor = 'crosshair';
+  }
 
   // progress bar
   const progress = (streamTime - GLOBAL_TMIN) / (GLOBAL_TMAX - GLOBAL_TMIN || 1);
@@ -716,7 +797,14 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
     mainView = btn.dataset.view;
     document.querySelectorAll('.view-toggle button').forEach(b =>
       b.classList.toggle('active', b === btn));
-    if (mainView === 'stream') streamReset();
+    if (mainView === 'stream') {
+      if (!selectedStreamTable && tableList.length) {
+        selectStreamTable(tableList[0].table);
+        document.getElementById('stream-table-input').value = tableList[0].table;
+      } else {
+        streamReset();
+      }
+    }
     refreshHeader();
     closePanel();
     searchInput.value = ''; filterQuery = ''; recomputeVisibleTables();
@@ -1081,7 +1169,6 @@ function loop() {
   if (viewMode === 'ip_timeline') renderIpTimeline();
   else if (mainView === 'stream') {
     tickStream(dtMs);
-    updatePulses(dtMs / 1000);
     renderStream();
   }
   else if (mainView === 'ips') renderIpParticles();
