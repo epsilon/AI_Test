@@ -992,63 +992,25 @@ function renderUsersView() {
         const fnSize = Math.max(8, labelSize * 0.5);
         const lineH = fnSize * 1.35;
         const listTop = nextY + lineH * 0.6;
-        let yy = listTop + fnSize;
+        const available = sh - (listTop - sy) - 6;
+        const maxLines = Math.floor(available / lineH);
         const fnMaxChars = Math.floor((sw - 16) / (fnSize * 0.6));
         ctx.font = `${fnSize}px JetBrains Mono`;
-
-        // FUNCTIONS
-        const fnAvail = (sh * 0.45) - (listTop - sy);
-        const fnMaxLines = Math.max(0, Math.floor(fnAvail / lineH));
-        const fnTotal = r.functions.length;
-        const fnReserved = fnTotal > fnMaxLines ? 1 : 0;
-        const fnShown = r.functions.slice(0, Math.max(0, fnMaxLines - fnReserved));
         ctx.fillStyle = 'rgba(10,10,12,0.55)';
-        for (const fn of fnShown) {
+        const total = r.functions.length;
+        const showCount = Math.max(0, Math.min(total, maxLines));
+        const reservedForMore = total > maxLines ? 1 : 0;
+        const shown = r.functions.slice(0, Math.max(0, showCount - reservedForMore));
+        let yy = listTop + fnSize;
+        for (const fn of shown) {
           const s = shortFn(fn);
           const t2 = s.length > fnMaxChars ? s.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : s;
           ctx.fillText(t2, sx + 8, yy);
           yy += lineH;
         }
-        if (fnReserved && fnShown.length < fnTotal) {
+        if (reservedForMore) {
           ctx.fillStyle = 'rgba(10,10,12,0.45)';
-          ctx.fillText('+ ' + (fnTotal - fnShown.length) + ' more', sx + 8, yy);
-          yy += lineH;
-        }
-
-        // KEYWORDS (where values)
-        if (r.keywords && r.keywords.topValues.length && yy < sy + sh - lineH * 2) {
-          yy += lineH * 0.4;
-          ctx.fillStyle = 'rgba(120, 145, 90, 0.85)';
-          ctx.font = `bold ${fnSize}px JetBrains Mono`;
-          ctx.fillText('KEYWORDS', sx + 8, yy);
-          yy += lineH;
-          ctx.font = `${fnSize}px JetBrains Mono`;
-          ctx.fillStyle = 'rgba(40, 55, 30, 0.9)';
-          for (const kw of r.keywords.topValues) {
-            if (yy >= sy + sh - lineH * 0.5) break;
-            const txt = `${kw.key} (${kw.count})`;
-            const t2 = txt.length > fnMaxChars ? txt.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : txt;
-            ctx.fillText(t2, sx + 8, yy);
-            yy += lineH;
-          }
-        }
-
-        // SELECT ∩ WHERE
-        if (r.keywords && r.keywords.overlap.length && yy < sy + sh - lineH * 2) {
-          yy += lineH * 0.4;
-          ctx.fillStyle = 'rgba(90, 120, 145, 0.85)';
-          ctx.font = `bold ${fnSize}px JetBrains Mono`;
-          ctx.fillText('SELECT∩WHERE', sx + 8, yy);
-          yy += lineH;
-          ctx.font = `${fnSize}px JetBrains Mono`;
-          ctx.fillStyle = 'rgba(30, 45, 60, 0.9)';
-          for (const ov of r.keywords.overlap) {
-            if (yy >= sy + sh - lineH * 0.5) break;
-            const txt = `${ov.col} (${ov.count})`;
-            const t2 = txt.length > fnMaxChars ? txt.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : txt;
-            ctx.fillText(t2, sx + 8, yy);
-            yy += lineH;
-          }
+          ctx.fillText('+ ' + (total - shown.length) + ' more', sx + 8, yy);
         }
       }
     }
@@ -1503,6 +1465,37 @@ function _drawGroup(g, hoverBoxOut) {
   // stack end Y
   const stackEnd = tableYStart + n * tableH + (n-1) * relGap;
 
+  // PREV-SELECT → THIS-WHERE carry-over (right side)
+  if (g.prevCall) {
+    const prevSelect = new Set(g.prevCall.select_cols || []);
+    const thisWhereCols = Object.keys(c.where_values || {});
+    const carry = thisWhereCols.filter(col => prevSelect.has(col));
+    const rightX = tableX + tableW + 12;
+    const rightW = g.x + g.w - rightX - 8;
+    if (carry.length && rightW > 50) {
+      let ry = g.y + 28;
+      ctx.fillStyle = 'rgba(90, 160, 210, 0.95)';
+      ctx.font = 'bold 9px JetBrains Mono';
+      ctx.textAlign = 'left';
+      ctx.fillText('PREV →', rightX, ry);
+      ry += 12;
+      ctx.fillStyle = 'rgba(140, 180, 220, 0.9)';
+      ctx.font = '9px JetBrains Mono';
+      const maxChars = Math.max(4, Math.floor(rightW / 6));
+      for (const col of carry.slice(0, 14)) {
+        if (ry >= g.y + g.h - 6) break;
+        const t = col.length > maxChars ? col.slice(0, maxChars-1) + '…' : col;
+        ctx.fillText(t, rightX, ry);
+        ry += 11;
+      }
+      if (carry.length > 14 && ry < g.y + g.h - 6) {
+        ctx.fillStyle = 'rgba(139,134,128,0.7)';
+        ctx.font = '8px JetBrains Mono';
+        ctx.fillText(`+ ${carry.length - 14} more`, rightX, ry);
+      }
+    }
+  }
+
   if (tables.length > n) {
     ctx.fillStyle = 'rgba(139,134,128,0.7)';
     ctx.font = '8px JetBrains Mono';
@@ -1620,6 +1613,7 @@ function renderLineageDetail() {
       const c = path[i];
       const g = {
         call: c,
+        prevCall: i > 0 ? path[i-1] : null,
         x: cardX + 8 + i * (groupW + groupGap),
         y: groupAreaY,
         w: groupW,
