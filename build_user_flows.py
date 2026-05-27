@@ -308,7 +308,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="panel" id="panel">
-  <button class="close-btn" onclick="closePanel()">×</button>
+  <button class="close-btn" id="close-btn">×</button>
   <div class="panel-head">
     <div class="ip-big" id="p-ip"></div>
     <div class="ctx-line" id="p-ctx"></div>
@@ -455,6 +455,57 @@ function toggleGather() {
   }
 }
 
+// --- EDGES ---
+// JOIN edges: tables that appear in the same call (same SQL flow)
+// SESSION edges: tables that appear in consecutive calls of the same (ip,port)
+const particleByTable = {};
+for (const p of tableParticles) particleByTable[p.table] = p;
+
+const joinEdges = {};      // 'a__b' -> count
+const sessionEdges = {};   // 'a__b' -> count
+
+for (const c of CALLS) {
+  const tbs = c.tables || [];
+  for (let i = 0; i < tbs.length; i++) {
+    for (let j = i+1; j < tbs.length; j++) {
+      const a = tbs[i], b = tbs[j];
+      if (a === b) continue;
+      const k = a < b ? a + '__' + b : b + '__' + a;
+      joinEdges[k] = (joinEdges[k] || 0) + 1;
+    }
+  }
+}
+
+const _portCalls = {};
+for (const c of CALLS) {
+  const key = (c.ip || '?') + ':' + (c.port || '?');
+  (_portCalls[key] = _portCalls[key] || []).push(c);
+}
+for (const key of Object.keys(_portCalls)) {
+  const arr = _portCalls[key].sort((a, b) => (a._start || 0) - (b._start || 0));
+  for (let i = 0; i < arr.length - 1; i++) {
+    const ta = arr[i].tables || [];
+    const tb = arr[i+1].tables || [];
+    if (!ta.length || !tb.length) continue;
+    for (const a of ta) {
+      for (const b of tb) {
+        if (a === b) continue;
+        const k = a < b ? a + '__' + b : b + '__' + a;
+        sessionEdges[k] = (sessionEdges[k] || 0) + 1;
+      }
+    }
+  }
+}
+
+// remove session edges that are also join edges — JOIN takes priority
+for (const k of Object.keys(sessionEdges)) {
+  if (joinEdges[k]) delete sessionEdges[k];
+}
+
+// max counts for opacity scaling
+const _joinMax = Math.max(1, ...Object.values(joinEdges));
+const _sessMax = Math.max(1, ...Object.values(sessionEdges));
+
 const searchInput = document.getElementById('search');
 searchInput.addEventListener('input', e => { filterQuery = e.target.value.trim().toLowerCase(); });
 function ipVisible(s) {
@@ -543,8 +594,39 @@ function renderIpParticles() {
 
 // --- TABLE PARTICLES ---
 function renderTableParticles() {
-  // domain labels — only when clustered
+  // edges + domain labels — only when clustered
   if (clustered) {
+    // session edges (sky blue) drawn first, under join edges
+    ctx.lineWidth = 1;
+    for (const k of Object.keys(sessionEdges)) {
+      const [a, b] = k.split('__');
+      const pa = particleByTable[a], pb = particleByTable[b];
+      if (!pa || !pb) continue;
+      const cnt = sessionEdges[k];
+      const alpha = Math.min(0.5, 0.05 + (cnt / _sessMax) * 0.45);
+      ctx.strokeStyle = `rgba(135, 206, 250, ${alpha})`;
+      ctx.beginPath();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      ctx.stroke();
+    }
+    // join edges (red) on top
+    for (const k of Object.keys(joinEdges)) {
+      const [a, b] = k.split('__');
+      const pa = particleByTable[a], pb = particleByTable[b];
+      if (!pa || !pb) continue;
+      const cnt = joinEdges[k];
+      const alpha = Math.min(0.75, 0.1 + (cnt / _joinMax) * 0.65);
+      ctx.strokeStyle = `rgba(217, 96, 96, ${alpha})`;
+      ctx.lineWidth = 1 + Math.min(2, (cnt / _joinMax) * 2);
+      ctx.beginPath();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+
+    // domain labels
     ctx.save();
     ctx.font = '600 11px JetBrains Mono';
     ctx.fillStyle = 'rgba(245,241,232,0.4)';
@@ -1007,6 +1089,10 @@ function fillCallDetail(detail, c) {
 }
 
 function closePanel() { document.getElementById('panel').classList.remove('open'); }
+document.getElementById('close-btn').addEventListener('click', e => {
+  e.stopPropagation();
+  closePanel();
+});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (document.getElementById('panel').classList.contains('open')) closePanel();
