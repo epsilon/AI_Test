@@ -1263,6 +1263,9 @@ let _moundsCacheVw = 0, _moundsCacheVh = 0;
 let lineageMetric = 'count';   // 'count' | 'duration'
 let _moundsItems = null;
 let _moundsLastTime = performance.now();
+let _moundsWindX = 0;          // current wind force from drag
+let _lastDragMouseX = null;    // for velocity tracking
+let _lastDragTime = null;
 
 function _moundsBuildOrUpdate() {
   const items = lineageTableItems;
@@ -1368,13 +1371,12 @@ function _drawMound(m, time, isHover) {
     const y = m.baseY - Math.exp(-u * u * 0.5) * m.height;
     const heightFromBase = m.baseY - y;
     const factor = m.height > 0 ? Math.min(1, heightFromBase / m.height) : 0;
-    const phase = m.seed * 0.0007 + j * 0.18;
-    const windX = Math.sin(time * 0.0009 + phase) * 2.5 * factor;
-    const windY = Math.cos(time * 0.0006 + phase * 0.6) * 1.2 * factor;
+    // wind bend — peak bends more than base
+    const windX = _moundsWindX * 7 * factor;
     const jt = jitter[j] || { jx: 0, jy: 0 };
     ctx.lineTo(
       (x + jt.jx + windX) * lineageScale + lineageOffX,
-      (y + jt.jy + windY) * lineageScale + lineageOffY
+      (y + jt.jy) * lineageScale + lineageOffY
     );
   }
   ctx.lineTo((m.cx + halfW) * lineageScale + lineageOffX, baseScreenY);
@@ -1397,6 +1399,10 @@ function renderLineageMounds() {
     _moundsBuildOrUpdate();
   }
   _moundsAnimate(dtMs);
+
+  // wind decay — exponential decay toward 0 when not dragging
+  _moundsWindX *= Math.exp(-dtMs / 280);
+  if (Math.abs(_moundsWindX) < 0.01) _moundsWindX = 0;
 
   // header
   ctx.save();
@@ -2056,6 +2062,7 @@ document.addEventListener('keydown', e => {
     if (mainView === 'lineage' && lineageMode === 'detail') {
       lineageMode = 'treemap';
       lineageSelected = null;
+      refreshHeader();
       return;
     }
   }
@@ -2501,6 +2508,7 @@ canvas.addEventListener('click', e => {
       if (lineageHover) {
         lineageSelected = lineageHover.key;
         lineageMode = 'detail';
+        refreshHeader();
       }
     } else {
       if (lineageDetailHover) {
