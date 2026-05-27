@@ -288,6 +288,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button class="active" data-view="ips">BY IP</button>
   <button data-view="tables">BY TABLE</button>
   <button data-view="stream">STREAM</button>
+  <button data-view="users">USERS</button>
 </div>
 
 <div class="hint" id="hint">CLICK TO INSPECT</div>
@@ -324,6 +325,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button id="stream-speed-1000">1000×</button>
   <button id="stream-speed-10000">10000×</button>
   <button id="stream-reset">↺ RESTART</button>
+</div>
+
+<div class="bottom-controls" id="users-controls" style="left: 28px;">
+  <button id="users-mapped" class="active">MAPPED USERS</button>
+  <button id="users-unmapped">UNMAPPED · BY TABLE</button>
 </div>
 
 <div class="tooltip" id="tooltip">
@@ -696,6 +702,232 @@ for (const speed of [100, 1000, 10000]) {
   });
 }
 
+// --- USERS view (treemap) ---
+let usersMode = 'mapped';  // 'mapped' | 'unmapped'
+let userRects = [];        // current visible treemap rects
+let _userHover = null;
+
+const mappedCalls = CALLS.filter(c => c.session_user_id);
+const unmappedCalls = CALLS.filter(c => !c.session_user_id);
+
+const callsByUser = {};
+for (const c of mappedCalls) {
+  const u = c.session_user_id;
+  (callsByUser[u] = callsByUser[u] || []).push(c);
+}
+const userItems = Object.entries(callsByUser)
+  .map(([user, calls]) => ({ key: user, calls, value: calls.length }))
+  .sort((a, b) => b.value - a.value);
+
+const callsByUnmappedTable = {};
+for (const c of unmappedCalls) {
+  for (const t of (c.tables || [])) {
+    (callsByUnmappedTable[t] = callsByUnmappedTable[t] || []).push(c);
+  }
+}
+const unmappedTableItems = Object.entries(callsByUnmappedTable)
+  .map(([t, calls]) => ({ key: t, calls, value: calls.length }))
+  .sort((a, b) => b.value - a.value);
+
+// squarified treemap
+function squarify(items, rect) {
+  if (!items.length) return [];
+  if (items.length === 1) return [{ ...items[0], rect: {...rect} }];
+
+  const total = items.reduce((s, i) => s + i.value, 0);
+  const isHoriz = rect.w >= rect.h;
+  const length = isHoriz ? rect.h : rect.w;
+
+  let row = [];
+  let rowSum = 0;
+  let bestWorst = Infinity;
+  let i = 0;
+
+  while (i < items.length) {
+    const newSum = rowSum + items[i].value;
+    const newRow = [...row, items[i]];
+    const rowFrac = newSum / total;
+    const rowSize = isHoriz ? rect.w * rowFrac : rect.h * rowFrac;
+    const worst = newRow.reduce((mx, item) => {
+      const itemFrac = item.value / newSum;
+      const itemLen = length * itemFrac;
+      const ratio = Math.max(rowSize / itemLen, itemLen / rowSize);
+      return Math.max(mx, ratio);
+    }, 0);
+    if (worst > bestWorst && row.length > 0) break;
+    row.push(items[i]);
+    rowSum = newSum;
+    bestWorst = worst;
+    i++;
+  }
+
+  const rowFrac = rowSum / total;
+  const rowSize = isHoriz ? rect.w * rowFrac : rect.h * rowFrac;
+  const placed = [];
+  let offset = 0;
+  for (const item of row) {
+    const itemFrac = item.value / rowSum;
+    const itemLen = length * itemFrac;
+    if (isHoriz) {
+      placed.push({ ...item, rect: { x: rect.x, y: rect.y + offset, w: rowSize, h: itemLen } });
+    } else {
+      placed.push({ ...item, rect: { x: rect.x + offset, y: rect.y, w: itemLen, h: rowSize } });
+    }
+    offset += itemLen;
+  }
+  let restRect;
+  if (isHoriz) {
+    restRect = { x: rect.x + rowSize, y: rect.y, w: rect.w - rowSize, h: rect.h };
+  } else {
+    restRect = { x: rect.x, y: rect.y + rowSize, w: rect.w, h: rect.h - rowSize };
+  }
+  return [...placed, ...squarify(items.slice(i), restRect)];
+}
+
+function renderUsersView() {
+  const items = usersMode === 'mapped' ? userItems : unmappedTableItems;
+  const top = 160, bot = 90, side = 24;
+  const rect = { x: side, y: top, w: vw - side*2, h: vh - top - bot };
+
+  // header
+  ctx.save();
+  ctx.fillStyle = 'rgba(245,241,232,0.85)';
+  ctx.font = '300 36px Fraunces, serif';
+  ctx.textAlign = 'center';
+  if (usersMode === 'mapped') {
+    ctx.fillText(`${items.length.toLocaleString()} mapped users`, vw/2, 88);
+    ctx.fillStyle = 'rgba(139,134,128,0.85)';
+    ctx.font = '10px JetBrains Mono';
+    ctx.fillText(`${mappedCalls.length.toLocaleString()} of ${CALLS.length.toLocaleString()} calls mapped via login function · rect size = call count`, vw/2, 112);
+  } else {
+    ctx.fillText(`${items.length.toLocaleString()} tables · unmapped traffic`, vw/2, 88);
+    ctx.fillStyle = 'rgba(139,134,128,0.85)';
+    ctx.font = '10px JetBrains Mono';
+    ctx.fillText(`${unmappedCalls.length.toLocaleString()} calls without user mapping · grouped by table`, vw/2, 112);
+  }
+  ctx.restore();
+
+  if (!items.length) return;
+
+  // compute treemap
+  userRects = squarify(items, rect);
+
+  // draw
+  let hover = null;
+  for (const r of userRects) {
+    if (!r.rect || r.rect.w < 1 || r.rect.h < 1) continue;
+    const hue = hashHue(r.key);
+    const isHover = mouseX >= r.rect.x && mouseX <= r.rect.x + r.rect.w
+                 && mouseY >= r.rect.y && mouseY <= r.rect.y + r.rect.h;
+    if (isHover) hover = r;
+
+    ctx.fillStyle = isHover
+      ? `hsla(${hue}, 55%, 70%, 0.95)`
+      : `hsla(${hue}, 45%, 50%, 0.75)`;
+    ctx.fillRect(r.rect.x, r.rect.y, r.rect.w, r.rect.h);
+    ctx.strokeStyle = 'rgba(10,10,12,0.5)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(r.rect.x, r.rect.y, r.rect.w, r.rect.h);
+
+    // label if room
+    if (r.rect.w > 60 && r.rect.h > 24) {
+      ctx.fillStyle = 'rgba(10,10,12,0.85)';
+      ctx.textAlign = 'left';
+      const labelSize = Math.max(10, Math.min(20, Math.sqrt(r.rect.w * r.rect.h) / 8));
+      ctx.font = `${labelSize}px JetBrains Mono`;
+      const txt = r.key.length > Math.floor(r.rect.w / (labelSize * 0.55))
+        ? r.key.slice(0, Math.floor(r.rect.w / (labelSize * 0.55)) - 1) + '…'
+        : r.key;
+      ctx.fillText(txt, r.rect.x + 8, r.rect.y + labelSize + 4);
+      // count
+      ctx.fillStyle = 'rgba(10,10,12,0.6)';
+      ctx.font = `${Math.max(9, labelSize * 0.6)}px JetBrains Mono`;
+      ctx.fillText(r.value.toLocaleString() + ' calls', r.rect.x + 8, r.rect.y + labelSize + 4 + labelSize * 0.7);
+    }
+  }
+  _userHover = hover;
+
+  // tooltip
+  const tt = document.getElementById('tooltip');
+  if (hover) {
+    document.getElementById('tt-ip').textContent = (usersMode === 'mapped' ? 'USER ' : 'TABLE ') + hover.key;
+    const calls = hover.calls;
+    const fns = new Set(calls.map(c => c.function));
+    const ips = new Set(calls.map(c => c.ip));
+    document.getElementById('tt-meta').textContent =
+      `${calls.length.toLocaleString()} calls · ${fns.size} functions · ${ips.size} IPs`;
+    document.getElementById('tt-meta').style.whiteSpace = 'nowrap';
+    tt.style.display = 'block';
+    tt.style.left = (mouseX + 14) + 'px';
+    tt.style.top = (mouseY + 14) + 'px';
+    canvas.style.cursor = 'pointer';
+  } else {
+    tt.style.display = 'none';
+    canvas.style.cursor = 'crosshair';
+  }
+}
+
+function openUserDetailPanel(r) {
+  const pIp = document.getElementById('p-ip');
+  const hue = hashHue(r.key);
+  pIp.style.color = `hsl(${hue}, 55%, 65%)`;
+  pIp.textContent = (usersMode === 'mapped' ? 'USER ' : 'TABLE ') + r.key;
+
+  const calls = r.calls;
+  const fns = {};
+  for (const c of calls) (fns[c.function] = fns[c.function] || []).push(c);
+  const ips = new Set(calls.map(c => c.ip));
+  const ports = new Set(calls.map(c => c.port));
+
+  document.getElementById('p-ctx').textContent =
+    `${calls.length.toLocaleString()} calls · ${Object.keys(fns).length} functions · ${ips.size} IPs · ${ports.size} sessions`;
+  document.getElementById('p-summary').innerHTML = `
+    <span><strong>${calls.length}</strong>calls</span>
+    <span><strong>${Object.keys(fns).length}</strong>functions</span>
+    <span><strong>${ips.size}</strong>IPs</span>
+  `;
+
+  const body = document.getElementById('p-body');
+  body.innerHTML = '';
+  const tCol = `hsl(${hue}, 55%, 65%)`;
+  const fnEntries = Object.entries(fns).sort((a, b) => b[1].length - a[1].length);
+  for (const [fn, arr] of fnEntries) {
+    const group = document.createElement('div');
+    group.className = 'group';
+    const lbl = document.createElement('div');
+    lbl.className = 'group-label';
+    lbl.style.borderLeftColor = tCol;
+    lbl.textContent = `${shortFn(fn) || fn} · ${arr.length} call${arr.length>1?'s':''}`;
+    group.appendChild(lbl);
+    arr.sort((a, b) => (a._start || 0) - (b._start || 0));
+    const shown = arr.slice(0, 50);
+    for (const c of shown) group.appendChild(makeTableCallRow(c));
+    if (arr.length > 50) {
+      const more = document.createElement('div');
+      more.className = 'group-label';
+      more.style.borderLeftColor = 'var(--text-dim)';
+      more.style.marginTop = '8px';
+      more.textContent = `+ ${arr.length - 50} more (truncated)`;
+      group.appendChild(more);
+    }
+    body.appendChild(group);
+  }
+  document.getElementById('panel').classList.add('open');
+}
+
+document.getElementById('users-mapped').addEventListener('click', () => {
+  usersMode = 'mapped';
+  document.getElementById('users-mapped').classList.add('active');
+  document.getElementById('users-unmapped').classList.remove('active');
+  closePanel();
+});
+document.getElementById('users-unmapped').addEventListener('click', () => {
+  usersMode = 'unmapped';
+  document.getElementById('users-unmapped').classList.add('active');
+  document.getElementById('users-mapped').classList.remove('active');
+  closePanel();
+});
+
 // --- EDGES ---
 // JOIN edges: tables that appear in the same call (same SQL flow)
 // SESSION edges: tables that appear in consecutive calls of the same (ip,port)
@@ -823,6 +1055,7 @@ function refreshHeader() {
     document.getElementById('search').placeholder = 'filter by ip...';
     document.getElementById('bottom-controls').classList.remove('on');
     document.getElementById('stream-controls').classList.remove('on');
+    document.getElementById('users-controls').classList.remove('on');
     document.getElementById('search-box').classList.add('on');
     document.getElementById('hint').textContent = 'CLICK TO INSPECT';
   } else if (mainView === 'tables') {
@@ -835,6 +1068,7 @@ function refreshHeader() {
     document.getElementById('search').placeholder = 'filter by table...';
     document.getElementById('bottom-controls').classList.add('on');
     document.getElementById('stream-controls').classList.remove('on');
+    document.getElementById('users-controls').classList.remove('on');
     document.getElementById('search-box').classList.add('on');
     document.getElementById('hint').textContent = 'CLICK TO INSPECT';
   } else if (mainView === 'stream') {
@@ -844,8 +1078,19 @@ function refreshHeader() {
     document.getElementById('stats').innerHTML = '';
     document.getElementById('bottom-controls').classList.remove('on');
     document.getElementById('stream-controls').classList.add('on');
+    document.getElementById('users-controls').classList.remove('on');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = '';
+  } else if (mainView === 'users') {
+    document.getElementById('title').textContent = 'Users';
+    document.getElementById('title').classList.remove('ip-mode');
+    document.getElementById('subtitle').textContent = 'MAPPED USERS BY CALL COUNT · CLICK A RECT FOR DETAILS';
+    document.getElementById('stats').innerHTML = '';
+    document.getElementById('bottom-controls').classList.remove('on');
+    document.getElementById('stream-controls').classList.remove('on');
+    document.getElementById('users-controls').classList.add('on');
+    document.getElementById('search-box').classList.remove('on');
+    document.getElementById('hint').textContent = 'CLICK A RECT TO EXPLORE';
   }
   document.getElementById('legend').classList.remove('on');
   document.getElementById('back-btn').classList.remove('on');
@@ -1171,6 +1416,7 @@ function loop() {
     tickStream(dtMs);
     renderStream();
   }
+  else if (mainView === 'users') renderUsersView();
   else if (mainView === 'ips') renderIpParticles();
   else renderTableParticles();
   requestAnimationFrame(loop);
@@ -1183,10 +1429,14 @@ canvas.addEventListener('click', e => {
     if (canvas._hoverCall) openCallPanel(canvas._hoverCall);
     return;
   }
+  if (mainView === 'users') {
+    if (_userHover) openUserDetailPanel(_userHover);
+    return;
+  }
   const hovered = canvas._hover;
   if (!hovered) return;
   if (mainView === 'ips') selectIP(hovered.ip);
-  else openTablePanel(hovered);
+  else if (mainView === 'tables') openTablePanel(hovered);
 });
 
 function selectIP(ip) {
@@ -1208,6 +1458,7 @@ function selectIP(ip) {
   document.getElementById('view-toggle').classList.add('hidden');
   document.getElementById('bottom-controls').classList.remove('on');
   document.getElementById('stream-controls').classList.remove('on');
+  document.getElementById('users-controls').classList.remove('on');
   document.getElementById('hint').textContent = 'CLICK BAR FOR SQL';
   closePanel();
 }
@@ -1454,6 +1705,7 @@ def build_user_flows(df: pd.DataFrame, out_path: str = 'user_flows.html'):
             'datasources': list(row.get('datasources') or []),
             'sqls': list(row.get('sqls') or []),
             'tables': list(row.get('tables') or []),
+            'session_user_id': row.get('session_user_id') if pd.notna(row.get('session_user_id')) else None,
         })
 
     # pre-compute global time range here (much faster than in JS)
