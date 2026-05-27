@@ -726,3 +726,21 @@ def _where_vals(sqls):
 df['where_values'] = df['sqls'].apply(_where_vals)
 print(f"where_values: {(df['where_values'].str.len() > 0).sum():,}")
 print("done")
+
+# 관심 키워드
+def _select_cols_one(sql):
+    cols = set()
+    try:
+        parsed = sqlglot.parse_one(sql, dialect='oracle')
+        if not hasattr(parsed, 'find_all'): return list(cols)
+        for s in parsed.find_all(exp.Select):
+            for proj in (s.expressions or []):
+                if hasattr(proj, 'find_all'):
+                    for col in proj.find_all(exp.Column):
+                        if col.name: cols.add(col.name.lower())
+    except Exception:
+        pass
+    return sorted(cols)
+
+df['select_cols'] = df['sqls'].apply(lambda sqls: sorted({c for s in (sqls or []) for c in _select_cols_one(s)}))
+print(f"select_cols 있는 call: {(df['select_cols'].str.len() > 0).sum():,}")
