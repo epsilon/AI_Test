@@ -635,3 +635,76 @@ for i, sql in enumerate(test):
                     print(f"  WHERE EQ: {lt}={rt} (tables: {lt.table}, {rt.table})")
     except Exception as e:
         print(f"파싱 실패: {e}")
+
+# join pair 만들기
+import sqlglot
+from sqlglot import exp
+import re
+
+# --- JOIN pairs ---
+def _aliases(parsed):
+    a = {}
+    for t in parsed.find_all(exp.Table):
+        nm = (t.name or '').lower()
+        al = (t.alias_or_name or '').lower()
+        if nm: a[nm] = nm
+        if al and al != nm: a[al] = nm
+    return a
+
+def _pairs_one(sql):
+    pairs = []
+    try: parsed = sqlglot.parse_one(sql, dialect='oracle')
+    except: return pairs
+    al = _aliases(parsed)
+    def collect(node):
+        if node is None: return
+        for eq in node.find_all(exp.EQ):
+            lt, rt = eq.left, eq.right
+            if isinstance(lt, exp.Column) and isinstance(rt, exp.Column):
+                ta = al.get((lt.table or '').lower(), (lt.table or '').lower())
+                tb = al.get((rt.table or '').lower(), (rt.table or '').lower())
+                if ta and tb and ta != tb:
+                    pairs.append((ta, lt.name.lower(), tb, rt.name.lower()))
+    for j in parsed.find_all(exp.Join): collect(j.args.get('on'))
+    collect(parsed.args.get('where'))
+    return pairs
+
+df['join_pairs'] = df['sqls'].apply(lambda sqls: [p for s in (sqls or []) for p in _pairs_one(s)])
+
+# --- UNION pairs ---
+def _union_one(sql):
+    pairs = set()
+    try: parsed = sqlglot.parse_one(sql, dialect='oracle')
+    except: return list(pairs)
+    for u in parsed.find_all(exp.Union):
+        lt = {(t.name or '').lower() for t in (u.left.find_all(exp.Table) if u.left else [])}
+        rt = {(t.name or '').lower() for t in (u.right.find_all(exp.Table) if u.right else [])}
+        for a in lt:
+            for b in rt:
+                if a and b and a != b:
+                    pairs.add(tuple(sorted([a, b])))
+    return [list(p) for p in pairs]
+
+df['union_pairs'] = df['sqls'].apply(lambda sqls: [p for s in (sqls or []) for p in _union_one(s)])
+
+# --- WHERE values ---
+WHERE_EQ = re.compile(r"(\w+)\s*=\s*'([^']{1,80})'", re.IGNORECASE)
+WHERE_IN = re.compile(r"(\w+)\s+in\s*\(([^)]{1,400})\)", re.IGNORECASE)
+
+def _where_vals(sqls):
+    out = {}
+    for sql in (sqls or []):
+        for m in WHERE_EQ.finditer(sql):
+            out.setdefault(m.group(1).lower(), set()).add(m.group(2))
+        for m in WHERE_IN.finditer(sql):
+            for v in m.group(2).split(','):
+                v = v.strip().strip("'\"")
+                if v: out.setdefault(m.group(1).lower(), set()).add(v)
+    return {k: sorted(list(v))[:8] for k, v in out.items()}
+
+df['where_values'] = df['sqls'].apply(_where_vals)
+
+print("done")
+print(f"join_pairs 있는 call: {(df['join_pairs'].str.len() > 0).sum():,}")
+print(f"union_pairs 있는 call: {(df['union_pairs'].str.len() > 0).sum():,}")
+print(f"where_values 있는 call: {(df['where_values'].str.len() > 0).sum():,}")
