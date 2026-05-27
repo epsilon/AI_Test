@@ -1191,7 +1191,7 @@ const lineageTableItems = [];
 
 let lineageMode = 'treemap';
 let lineageSelected = null;
-let lineageWindow = 2;  // path window size
+let lineageWindow = 1;  // path window size (prev/selected/next)
 let lineageRects = [];
 let lineageHover = null;
 let lineageDetailHover = null;
@@ -1279,6 +1279,205 @@ function renderLineageTreemap() {
   }
 }
 
+function _drawGroup(g, hoverBoxOut) {
+  const c = g.call;
+  const tables = c.tables || [];
+
+  // function name + cache (group header)
+  ctx.fillStyle = 'rgba(245,241,232,0.95)';
+  ctx.font = 'bold 11px JetBrains Mono';
+  ctx.textAlign = 'left';
+  const fn = shortFn(c.function || '');
+  const headerTxt = fn + (g.isSelected ? '  ←' : '');
+  const maxHeader = Math.floor((g.w - 80) / 7);
+  const shownFn = headerTxt.length > maxHeader ? headerTxt.slice(0, maxHeader-1) + '…' : headerTxt;
+  ctx.fillText(shownFn, g.x + 4, g.y + 12);
+
+  // cache badge
+  if (c.cache) {
+    const cacheTxt = c.cache === 'hit' ? 'CACHE HIT' : c.cache === 'miss' ? 'CACHE MISS' : 'CACHE';
+    ctx.font = 'bold 8px JetBrains Mono';
+    const cw = ctx.measureText(cacheTxt).width + 8;
+    const cx = g.x + g.w - cw - 2;
+    const cy = g.y + 2;
+    const cacheColor = c.cache === 'hit' ? 'rgba(232, 160, 74, 0.85)' : c.cache === 'miss' ? 'rgba(94, 192, 192, 0.85)' : 'rgba(160,160,160,0.7)';
+    ctx.fillStyle = cacheColor;
+    ctx.fillRect(cx, cy, cw, 13);
+    ctx.fillStyle = 'rgba(10,10,12,0.95)';
+    ctx.textAlign = 'center';
+    ctx.fillText(cacheTxt, cx + cw/2, cy + 10);
+  }
+
+  if (!tables.length) return [];
+
+  // table layout — horizontal, with gap for relation labels
+  const tableH = 30;
+  const minTableW = 80;
+  const maxTableW = 130;
+  const relGap = 70;  // space between tables for relation label
+  
+  // figure size
+  const n = Math.min(tables.length, 4);  // cap at 4 per group
+  const shownTables = tables.slice(0, n);
+  const availW = g.w - 8;
+  const idealTotal = n * maxTableW + (n-1) * relGap;
+  let tableW;
+  if (idealTotal <= availW) tableW = maxTableW;
+  else tableW = Math.max(minTableW, (availW - (n-1) * relGap) / n);
+  const totalW = n * tableW + (n-1) * relGap;
+  const startX = g.x + (g.w - totalW) / 2;
+  const tableY = g.y + 24;
+
+  // relations between visible table pairs
+  const visibleIdx = new Map();
+  shownTables.forEach((t, i) => visibleIdx.set(t, i));
+  const rels = [];
+  for (const [ta, ka, tb, kb] of (c.join_pairs || [])) {
+    const ai = visibleIdx.get(ta);
+    const bi = visibleIdx.get(tb);
+    if (ai != null && bi != null && ai !== bi) {
+      const lo = Math.min(ai, bi), hi = Math.max(ai, bi);
+      const label = ai < bi ? `${ka} = ${kb}` : `${kb} = ${ka}`;
+      rels.push({ from: lo, to: hi, type: 'join', label });
+    }
+  }
+  for (const [a, b] of (c.union_pairs || [])) {
+    const ai = visibleIdx.get(a);
+    const bi = visibleIdx.get(b);
+    if (ai != null && bi != null && ai !== bi) {
+      const lo = Math.min(ai, bi), hi = Math.max(ai, bi);
+      rels.push({ from: lo, to: hi, type: 'union', label: '+' });
+    }
+  }
+
+  // draw relation lines first (so boxes overlay)
+  for (const r of rels) {
+    if (r.to - r.from > 1) continue;  // only adjacent for now
+    const fromX = startX + r.from * (tableW + relGap) + tableW;
+    const toX = startX + r.to * (tableW + relGap);
+    const lineY = tableY + tableH / 2;
+    
+    if (r.type === 'join') {
+      ctx.strokeStyle = 'rgba(217, 130, 100, 0.9)';
+      ctx.lineWidth = 1.8;
+    } else {
+      ctx.strokeStyle = 'rgba(140, 200, 220, 0.9)';
+      ctx.lineWidth = 1.8;
+    }
+    ctx.beginPath();
+    ctx.moveTo(fromX, lineY);
+    ctx.lineTo(toX, lineY);
+    ctx.stroke();
+  }
+
+  // collect hits for hover detection
+  const hits = [];
+
+  // draw tables
+  for (let i = 0; i < n; i++) {
+    const t = shownTables[i];
+    const isSelected = t === lineageSelected;
+    const tx = startX + i * (tableW + relGap);
+    const ty = tableY;
+
+    const hue = hashHue(t);
+    const isHover = mouseX >= tx && mouseX <= tx + tableW && mouseY >= ty && mouseY <= ty + tableH;
+    if (isHover && !isSelected) hoverBoxOut.box = { table: t };
+
+    if (isSelected) {
+      // selected — thick double border + bright fill
+      ctx.fillStyle = `hsla(${hue}, 65%, 60%, 0.98)`;
+      ctx.fillRect(tx, ty, tableW, tableH);
+      ctx.strokeStyle = 'rgba(245,241,232,0.95)';
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(tx - 1, ty - 1, tableW + 2, tableH + 2);
+      ctx.strokeStyle = 'rgba(232, 160, 74, 0.6)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tx - 4, ty - 4, tableW + 8, tableH + 8);
+    } else {
+      ctx.fillStyle = isHover ? `hsla(${hue}, 50%, 55%, 0.95)` : `hsla(${hue}, 40%, 42%, 0.85)`;
+      ctx.fillRect(tx, ty, tableW, tableH);
+      ctx.strokeStyle = 'rgba(10,10,12,0.6)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tx, ty, tableW, tableH);
+    }
+
+    ctx.fillStyle = 'rgba(10,10,12,0.95)';
+    ctx.font = isSelected ? 'bold 10px JetBrains Mono' : '10px JetBrains Mono';
+    ctx.textAlign = 'center';
+    const maxLen = Math.floor((tableW - 8) / 6);
+    const shownT = t.length > maxLen ? t.slice(0, maxLen-1) + '…' : t;
+    ctx.fillText(shownT, tx + tableW/2, ty + tableH/2 + 4);
+
+    hits.push({ table: t, rect: { x: tx, y: ty, w: tableW, h: tableH } });
+  }
+
+  // draw relation labels (over the line)
+  for (const r of rels) {
+    if (r.to - r.from > 1) continue;
+    const fromX = startX + r.from * (tableW + relGap) + tableW;
+    const toX = startX + r.to * (tableW + relGap);
+    const midX = (fromX + toX) / 2;
+    const lineY = tableY + tableH / 2;
+
+    if (r.type === 'join') {
+      ctx.font = '9px JetBrains Mono';
+      const labelW = ctx.measureText(r.label).width + 10;
+      ctx.fillStyle = 'rgba(18,14,12,0.95)';
+      ctx.fillRect(midX - labelW/2, lineY - 8, labelW, 16);
+      ctx.strokeStyle = 'rgba(217, 130, 100, 0.8)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(midX - labelW/2, lineY - 8, labelW, 16);
+      ctx.fillStyle = 'rgba(232, 180, 140, 1)';
+      ctx.textAlign = 'center';
+      ctx.fillText(r.label, midX, lineY + 3);
+    } else {
+      // UNION: big + sign
+      ctx.fillStyle = 'rgba(18,14,12,0.95)';
+      ctx.fillRect(midX - 14, lineY - 14, 28, 28);
+      ctx.strokeStyle = 'rgba(140, 200, 220, 0.8)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(midX - 14, lineY - 14, 28, 28);
+      ctx.fillStyle = 'rgba(140, 200, 220, 1)';
+      ctx.font = 'bold 22px JetBrains Mono';
+      ctx.textAlign = 'center';
+      ctx.fillText('+', midX, lineY + 8);
+    }
+  }
+
+  // extra tables hint
+  if (tables.length > n) {
+    ctx.fillStyle = 'rgba(139,134,128,0.7)';
+    ctx.font = '8px JetBrains Mono';
+    ctx.textAlign = 'left';
+    ctx.fillText(`+ ${tables.length - n} more tables`, g.x + 4, tableY + tableH + 12);
+  }
+
+  // WHERE values
+  const wv = c.where_values || {};
+  const wvEntries = Object.entries(wv);
+  if (wvEntries.length) {
+    let y = tableY + tableH + (tables.length > n ? 26 : 14);
+    ctx.fillStyle = 'rgba(170, 200, 140, 0.9)';
+    ctx.font = 'bold 8px JetBrains Mono';
+    ctx.textAlign = 'left';
+    ctx.fillText('WHERE', g.x + 4, y);
+    y += 11;
+    ctx.font = '8px JetBrains Mono';
+    const maxChars = Math.floor((g.w - 8) / 5.5);
+    for (const [col, vals] of wvEntries.slice(0, 4)) {
+      if (y >= g.y + g.h - 2) break;
+      const valArr = vals.slice(0, 3);
+      const txt = `${col}='${valArr.join("','")}'`;
+      const shown = txt.length > maxChars ? txt.slice(0, maxChars-1) + '…' : txt;
+      ctx.fillText(shown, g.x + 4, y);
+      y += 10;
+    }
+  }
+
+  return hits;
+}
+
 function renderLineageDetail() {
   if (!lineageSelected) return;
   const patterns = computeLineagePatterns(lineageSelected, lineageWindow);
@@ -1292,11 +1491,24 @@ function renderLineageDetail() {
   ctx.fillText('Lineage of ' + lineageSelected, vw/2, 50);
   ctx.fillStyle = 'rgba(139,134,128,0.85)';
   ctx.font = '10px JetBrains Mono';
-  ctx.fillText(`${patterns.length} unique paths · ${totalSessions} sessions · window=±${lineageWindow} · click box to navigate · ESC to back`, vw/2, 72);
+  ctx.fillText(`${patterns.length} unique paths · ${totalSessions} sessions · prev / SELECTED / next · click a table to navigate · ESC to back`, vw/2, 72);
   ctx.restore();
 
-  // pattern cards
-  const maxPatterns = Math.min(patterns.length, 6);
+  // legend
+  ctx.save();
+  ctx.font = '9px JetBrains Mono';
+  ctx.textAlign = 'left';
+  let lx = 24;
+  const ly = 90;
+  ctx.fillStyle = 'rgba(217, 130, 100, 0.95)'; ctx.fillRect(lx, ly-4, 14, 2);
+  ctx.fillStyle = 'rgba(180,180,180,0.85)'; ctx.fillText('JOIN', lx+18, ly+1); lx += 56;
+  ctx.fillStyle = 'rgba(140, 200, 220, 0.95)'; ctx.fillRect(lx, ly-4, 14, 2);
+  ctx.fillStyle = 'rgba(180,180,180,0.85)'; ctx.fillText('UNION (+)', lx+18, ly+1); lx += 86;
+  ctx.fillStyle = 'rgba(135, 206, 250, 0.55)'; ctx.fillRect(lx, ly-4, 14, 2);
+  ctx.fillStyle = 'rgba(180,180,180,0.85)'; ctx.fillText('TIME →', lx+18, ly+1);
+  ctx.restore();
+
+  const maxPatterns = Math.min(patterns.length, 4);
   if (maxPatterns === 0) {
     ctx.fillStyle = 'rgba(139,134,128,0.7)';
     ctx.font = '12px JetBrains Mono';
@@ -1305,21 +1517,21 @@ function renderLineageDetail() {
     return;
   }
 
-  const cardTop = 100;
-  const cardGap = 8;
-  const cardHeight = (vh - cardTop - 30 - (maxPatterns - 1) * cardGap) / maxPatterns;
+  const cardTop = 108;
+  const cardGap = 10;
+  const cardHeight = (vh - cardTop - 30 - (maxPatterns-1)*cardGap) / maxPatterns;
 
-  let hoverBox = null;
+  const hoverOut = { box: null };
 
   for (let pi = 0; pi < maxPatterns; pi++) {
     const p = patterns[pi];
     const cardY = cardTop + pi * (cardHeight + cardGap);
+    const cardX = 20;
+    const cardW = vw - 40;
 
-    // card bg
-    ctx.fillStyle = 'rgba(30, 28, 26, 0.5)';
-    ctx.fillRect(20, cardY, vw - 40, cardHeight);
+    ctx.fillStyle = 'rgba(28, 26, 24, 0.55)';
+    ctx.fillRect(cardX, cardY, cardW, cardHeight);
 
-    // pattern header
     ctx.fillStyle = 'rgba(232,160,74,0.9)';
     ctx.font = 'bold 11px JetBrains Mono';
     ctx.textAlign = 'left';
@@ -1328,147 +1540,51 @@ function renderLineageDetail() {
                       : p.isStart ? '· starts here'
                       : p.isEnd ? '· ends here'
                       : '· mid-session';
-    ctx.fillText(`PATTERN ${pi+1}  ·  ${p.count} sessions (${pct}%)  ${positionTag}`, 30, cardY + 18);
+    ctx.fillText(`PATTERN ${pi+1}  ·  ${p.count} sessions (${pct}%)  ${positionTag}`, cardX + 8, cardY + 16);
 
-    // path boxes
     const path = p.sample;
-    const innerW = vw - 60;
-    const boxW = Math.min(220, (innerW - (path.length - 1) * 14) / Math.max(path.length, 1));
-    const boxH = cardHeight - 30;
-    const startX = 30 + (innerW - (path.length * boxW + (path.length - 1) * 14)) / 2;
-    const boxY = cardY + 24;
+    const groupGap = 36;
+    const groupAreaY = cardY + 24;
+    const groupAreaH = cardHeight - 28;
+    const groupW = (cardW - 16 - (path.length-1) * groupGap) / path.length;
 
     for (let i = 0; i < path.length; i++) {
       const c = path[i];
-      const bx = startX + i * (boxW + 14);
-      const by = boxY;
-      const isSelected = i === p.selectedIdx;
-      const tables = c.tables || [];
+      const g = {
+        call: c,
+        x: cardX + 8 + i * (groupW + groupGap),
+        y: groupAreaY,
+        w: groupW,
+        h: groupAreaH,
+        isSelected: i === p.selectedIdx,
+      };
 
-      // arrow to next
+      // arrow to next group (time flow)
       if (i < path.length - 1) {
+        const ax1 = g.x + g.w + 4;
+        const ax2 = g.x + g.w + groupGap - 6;
+        const ay = groupAreaY + groupAreaH / 2;
         ctx.strokeStyle = 'rgba(135, 206, 250, 0.55)';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(bx + boxW, by + boxH/2);
-        ctx.lineTo(bx + boxW + 14, by + boxH/2);
+        ctx.moveTo(ax1, ay);
+        ctx.lineTo(ax2, ay);
         ctx.stroke();
-        // arrowhead
+        ctx.fillStyle = 'rgba(135, 206, 250, 0.7)';
         ctx.beginPath();
-        ctx.moveTo(bx + boxW + 14, by + boxH/2);
-        ctx.lineTo(bx + boxW + 10, by + boxH/2 - 3);
-        ctx.lineTo(bx + boxW + 10, by + boxH/2 + 3);
+        ctx.moveTo(ax2, ay);
+        ctx.lineTo(ax2 - 5, ay - 4);
+        ctx.lineTo(ax2 - 5, ay + 4);
         ctx.closePath();
-        ctx.fillStyle = 'rgba(135, 206, 250, 0.55)';
         ctx.fill();
       }
 
-      // hover detection — pick first non-selected table for nav
-      const isMouseIn = mouseX >= bx && mouseX <= bx + boxW && mouseY >= by && mouseY <= by + boxH;
-      const navTable = tables.find(t => t !== lineageSelected) || tables[0];
-      if (isMouseIn && navTable && navTable !== lineageSelected) {
-        hoverBox = { table: navTable };
-      }
-
-      // box bg
-      const hue = isSelected ? hashHue(lineageSelected) : 210;
-      if (isSelected) {
-        ctx.fillStyle = isMouseIn ? `hsla(${hue}, 60%, 65%, 0.95)` : `hsla(${hue}, 55%, 55%, 0.9)`;
-      } else {
-        ctx.fillStyle = isMouseIn ? 'rgba(70, 80, 95, 0.95)' : 'rgba(45, 50, 60, 0.85)';
-      }
-      ctx.fillRect(bx, by, boxW, boxH);
-      ctx.strokeStyle = isSelected ? 'rgba(245,241,232,0.7)' : 'rgba(10,10,12,0.5)';
-      ctx.lineWidth = isSelected ? 2 : 1;
-      ctx.strokeRect(bx, by, boxW, boxH);
-
-      // content lines
-      let cy = by + 14;
-      ctx.textAlign = 'left';
-
-      // function name
-      ctx.fillStyle = isSelected ? 'rgba(10,10,12,0.95)' : 'rgba(245,241,232,0.95)';
-      ctx.font = 'bold 11px JetBrains Mono';
-      const fn = shortFn(c.function || '');
-      const maxFnChars = Math.floor((boxW - 16) / 7);
-      const fnTxt = fn.length > maxFnChars ? fn.slice(0, maxFnChars-1) + '…' : fn;
-      ctx.fillText(fnTxt, bx + 8, cy);
-      cy += 14;
-
-      // tables
-      ctx.font = '9px JetBrains Mono';
-      const maxTblChars = Math.floor((boxW - 16) / 6);
-      for (const t of tables.slice(0, 3)) {
-        if (cy >= by + boxH - 4) break;
-        const isT = t === lineageSelected;
-        ctx.fillStyle = isSelected
-          ? (isT ? 'rgba(10,10,12,1)' : 'rgba(10,10,12,0.7)')
-          : (isT ? 'rgba(245,241,232,1)' : 'rgba(180,170,150,0.85)');
-        ctx.font = isT ? 'bold 9px JetBrains Mono' : '9px JetBrains Mono';
-        const tt = t.length > maxTblChars ? t.slice(0, maxTblChars-1) + '…' : t;
-        ctx.fillText('· ' + tt, bx + 8, cy);
-        cy += 11;
-      }
-      if (tables.length > 3 && cy < by + boxH - 4) {
-        ctx.fillStyle = isSelected ? 'rgba(10,10,12,0.55)' : 'rgba(139,134,128,0.7)';
-        ctx.font = '8px JetBrains Mono';
-        ctx.fillText(`  +${tables.length - 3} tables`, bx + 8, cy);
-        cy += 10;
-      }
-
-      // JOIN keys
-      const jp = c.join_pairs || [];
-      if (jp.length && cy < by + boxH - 10) {
-        ctx.fillStyle = isSelected ? 'rgba(120, 40, 20, 0.85)' : 'rgba(217, 130, 100, 0.9)';
-        ctx.font = 'bold 8px JetBrains Mono';
-        ctx.fillText('JOIN', bx + 8, cy);
-        cy += 10;
-        ctx.font = '8px JetBrains Mono';
-        const seen = new Set();
-        for (const [ta, ka, tb, kb] of jp) {
-          if (cy >= by + boxH - 4) break;
-          const k = `${ka}=${kb}`;
-          if (seen.has(k) || seen.has(`${kb}=${ka}`)) continue;
-          seen.add(k);
-          const txt = `  ${ka}=${kb}`;
-          const shown = txt.length > maxTblChars ? txt.slice(0, maxTblChars-1) + '…' : txt;
-          ctx.fillText(shown, bx + 8, cy);
-          cy += 10;
-        }
-      }
-
-      // UNION
-      const up = c.union_pairs || [];
-      if (up.length && cy < by + boxH - 4) {
-        ctx.fillStyle = isSelected ? 'rgba(20, 60, 100, 0.85)' : 'rgba(140, 180, 220, 0.9)';
-        ctx.font = 'bold 8px JetBrains Mono';
-        ctx.fillText(`UNION (${up.length})`, bx + 8, cy);
-        cy += 10;
-      }
-
-      // WHERE values
-      const wv = c.where_values || {};
-      const wvEntries = Object.entries(wv);
-      if (wvEntries.length && cy < by + boxH - 10) {
-        ctx.fillStyle = isSelected ? 'rgba(40, 70, 30, 0.85)' : 'rgba(170, 200, 140, 0.85)';
-        ctx.font = 'bold 8px JetBrains Mono';
-        ctx.fillText('WHERE', bx + 8, cy);
-        cy += 10;
-        ctx.font = '8px JetBrains Mono';
-        for (const [col, vals] of wvEntries.slice(0, 3)) {
-          if (cy >= by + boxH - 2) break;
-          const valArr = vals.slice(0, 2);
-          const txt = `  ${col}='${valArr.join("','")}'`;
-          const shown = txt.length > maxTblChars ? txt.slice(0, maxTblChars-1) + '…' : txt;
-          ctx.fillText(shown, bx + 8, cy);
-          cy += 10;
-        }
-      }
+      _drawGroup(g, hoverOut);
     }
   }
 
-  lineageDetailHover = hoverBox;
-  canvas.style.cursor = hoverBox ? 'pointer' : 'default';
+  lineageDetailHover = hoverOut.box;
+  canvas.style.cursor = hoverOut.box ? 'pointer' : 'default';
   document.getElementById('tooltip').style.display = 'none';
 }
 
