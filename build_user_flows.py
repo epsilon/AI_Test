@@ -1249,78 +1249,53 @@ let _moundsCacheVw = 0, _moundsCacheVh = 0;
 function _computeMounds() {
   const items = lineageTableItems;
   const n = items.length;
-  if (!n) { _moundsCache = { items: [] }; return; }
+  if (!n) { _moundsCache = { items: [], totalWidth: 0 }; return; }
 
   const sideMargin = 40;
   const baseY = vh - 60;
   const topReserved = 140;
-  const maxHeight = baseY - topReserved - 20;
-
-  // mound widths ∝ sqrt(count), normalized to fit
-  const sqrts = items.map(it => Math.sqrt(it.count));
-  const sumSqrt = sqrts.reduce((a, b) => a + b, 0);
-  const availW = vw - sideMargin * 2;
-  const widths = sqrts.map(s => Math.max(28, (s / sumSqrt) * availW));
-  const totalW = widths.reduce((a, b) => a + b, 0);
-  const widthScale = totalW > availW ? availW / totalW : 1;
-  const adjWidths = widths.map(w => w * widthScale);
-
+  const maxHeight = baseY - topReserved - 30;
   const maxCount = Math.max(...items.map(it => it.count));
 
   const result = [];
   let cx = sideMargin;
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
-    const w = adjWidths[i];
-    const moundCx = cx + w / 2;
-    const spread = w * 0.45;
+    const frac = Math.sqrt(it.count / maxCount);
+    const height = 30 + frac * maxHeight;
+    const width = 60 + frac * 200;
+    const moundCx = cx + width / 2;
 
-    // height proportional to sqrt(count)
-    const heightFrac = Math.sqrt(it.count / maxCount);
-    const height = 30 + heightFrac * maxHeight;
-
-    // dot count: cap but scale with sqrt
-    const nDots = Math.min(800, Math.max(8, Math.floor(Math.sqrt(it.count) * 4)));
-
-    // seed by table name for stable layout
     let seed = 0;
     for (const ch of it.key) seed = (seed * 31 + ch.charCodeAt(0)) & 0xFFFFFFFF;
     const rng = _mulberry32(seed || 1);
 
-    const points = [];
-    let minX = Infinity, maxX = -Infinity, minY = Infinity;
-    for (let j = 0; j < nDots; j++) {
-      // box-muller gaussian
-      let u1 = rng(), u2 = rng();
-      if (u1 < 0.0001) u1 = 0.0001;
-      const g1 = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-      let u3 = rng(), u4 = rng();
-      if (u3 < 0.0001) u3 = 0.0001;
-      const g2 = Math.sqrt(-2 * Math.log(u3)) * Math.cos(2 * Math.PI * u4);
-
-      // y: only upward, peaked at base
-      const dy = Math.abs(g1) * height * 0.45;
-      // x: gaussian spread, narrows as height increases
-      const heightRatio = 1 - dy / (height * 0.6);
-      const dx = g2 * spread * 0.5 * Math.max(0.2, heightRatio);
-
-      const x = moundCx + dx;
-      const y = baseY - dy;
-      points.push({ x, y });
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
+    // bell curve path with hand-drawn jitter
+    const steps = Math.max(30, Math.floor(width / 6));
+    const halfW = width / 2;
+    const pathPoints = [];
+    for (let j = 0; j <= steps; j++) {
+      const t = j / steps;
+      const u = (t - 0.5) * 4.4;  // -2.2 to 2.2 for nice bell
+      const x = moundCx - halfW + t * width;
+      const y = baseY - Math.exp(-u * u * 0.5) * height;
+      // hand-drawn jitter — small irregular perturbation
+      const jx = (rng() - 0.5) * 2.2;
+      const jy = (rng() - 0.5) * 2.6;
+      pathPoints.push({ x: x + jx, y: y + jy });
     }
 
     result.push({
-      table: it.key, it, cx: moundCx, baseY,
-      width: w, height,
-      points,
-      bbox: { x: minX, y: minY - 4, w: maxX - minX, h: baseY - minY + 8 },
+      table: it.key, it,
+      cx: moundCx, baseY,
+      width, height,
+      pathPoints,
+      bbox: { x: moundCx - halfW - 4, y: baseY - height - 4, w: width + 8, h: height + 8 },
     });
-    cx += w;
+    cx += width + 6;
   }
-  _moundsCache = { items: result };
+
+  _moundsCache = { items: result, totalWidth: cx };
   _moundsCacheVw = vw;
   _moundsCacheVh = vh;
 }
@@ -1336,20 +1311,20 @@ function renderLineageMounds() {
   ctx.fillText(`${lineageTableItems.length.toLocaleString()} tables · usage lineage`, vw/2, 88);
   ctx.fillStyle = 'rgba(139,134,128,0.85)';
   ctx.font = '10px JetBrains Mono';
-  ctx.fillText(`each mound = one table · height ∝ √call count · click for lineage · scroll/drag · ${(lineageScale*100).toFixed(0)}%`, vw/2, 112);
+  ctx.fillText(`each mound = one table · drag to scroll · scroll wheel to zoom · click for lineage · ${(lineageScale*100).toFixed(0)}%`, vw/2, 112);
   ctx.restore();
 
   // baseline
   const baseScreenY = (vh - 60) * lineageScale + lineageOffY;
-  ctx.strokeStyle = 'rgba(139,134,128,0.25)';
+  ctx.strokeStyle = 'rgba(139,134,128,0.3)';
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(0, baseScreenY);
   ctx.lineTo(vw, baseScreenY);
   ctx.stroke();
 
+  // hover detection
   let hover = null;
-  // hover detection first
   for (const m of _moundsCache.items) {
     const bx = m.bbox.x * lineageScale + lineageOffX;
     const by = m.bbox.y * lineageScale + lineageOffY;
@@ -1360,33 +1335,50 @@ function renderLineageMounds() {
     }
   }
 
-  // draw mounds
+  // draw mounds — hand-drawn silhouettes
   for (const m of _moundsCache.items) {
+    const bx = m.bbox.x * lineageScale + lineageOffX;
+    const bw = m.bbox.w * lineageScale;
+    if (bx + bw < -20 || bx > vw + 20) continue;
+
     const hue = hashHue(m.table);
     const isHover = (hover === m);
-    const dotSize = Math.max(0.8, 2 * lineageScale);
-    ctx.fillStyle = isHover ? `hsla(${hue}, 70%, 65%, 0.95)` : `hsla(${hue}, 50%, 55%, 0.65)`;
-    for (const p of m.points) {
-      const px = p.x * lineageScale + lineageOffX;
-      const py = p.y * lineageScale + lineageOffY;
-      if (px < -4 || px > vw + 4 || py < -4 || py > vh + 4) continue;
-      ctx.beginPath();
-      ctx.arc(px, py, dotSize, 0, Math.PI * 2);
-      ctx.fill();
+    const base = (m.baseY) * lineageScale + lineageOffY;
+
+    ctx.beginPath();
+    const fp = m.pathPoints[0];
+    ctx.moveTo(fp.x * lineageScale + lineageOffX, base);
+    for (const p of m.pathPoints) {
+      ctx.lineTo(p.x * lineageScale + lineageOffX, p.y * lineageScale + lineageOffY);
     }
+    const lp = m.pathPoints[m.pathPoints.length - 1];
+    ctx.lineTo(lp.x * lineageScale + lineageOffX, base);
+    ctx.closePath();
+
+    ctx.fillStyle = isHover ? `hsla(${hue}, 60%, 50%, 0.7)` : `hsla(${hue}, 45%, 42%, 0.5)`;
+    ctx.fill();
+
+    ctx.strokeStyle = isHover ? `hsla(${hue}, 70%, 75%, 1)` : `hsla(${hue}, 55%, 62%, 0.85)`;
+    ctx.lineWidth = isHover ? 2 : 1.3;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
   }
 
-  // labels — always visible above larger mounds, on hover for all
+  // labels
   for (const m of _moundsCache.items) {
+    const bx = m.bbox.x * lineageScale + lineageOffX;
+    const bw = m.bbox.w * lineageScale;
+    if (bx + bw < -20 || bx > vw + 20) continue;
     const isHover = (hover === m);
     const labelX = m.cx * lineageScale + lineageOffX;
-    const peakY = m.bbox.y * lineageScale + lineageOffY;
+    const peakY = (m.baseY - m.height) * lineageScale + lineageOffY;
     const labelY = peakY - 8;
-    if (isHover || (m.width * lineageScale > 60 && m.height * lineageScale > 50)) {
-      ctx.fillStyle = isHover ? 'rgba(245,241,232,1)' : 'rgba(180,170,150,0.85)';
+
+    if (isHover || (m.width * lineageScale > 80 && m.height * lineageScale > 70)) {
+      ctx.fillStyle = isHover ? 'rgba(245,241,232,1)' : 'rgba(200,190,170,0.85)';
       ctx.font = isHover ? 'bold 11px JetBrains Mono' : '9px JetBrains Mono';
       ctx.textAlign = 'center';
-      const txt = m.table.length > 24 ? m.table.slice(0, 23) + '…' : m.table;
+      const txt = m.table.length > 28 ? m.table.slice(0, 27) + '…' : m.table;
       ctx.fillText(txt, labelX, labelY);
       if (isHover) {
         ctx.fillStyle = 'rgba(232,160,74,0.95)';
@@ -1397,8 +1389,6 @@ function renderLineageMounds() {
   }
 
   lineageHover = hover ? { key: hover.table, count: hover.it.count, duration: hover.it.duration, ...hover.it } : null;
-
-  // tooltip — keep clean; labels above mound do the job
   document.getElementById('tooltip').style.display = 'none';
   canvas.style.cursor = lineageDragging ? 'grabbing' : (hover ? 'pointer' : 'grab');
 }
