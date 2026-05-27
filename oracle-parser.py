@@ -541,3 +541,41 @@ def _union_one(sql):
 
 df['union_pairs'] = df['sqls'].apply(lambda sqls: [p for s in (sqls or []) for p in _union_one(s)])
 print(f"union 추출된 call: {(df['union_pairs'].str.len() > 0).sum():,}")
+
+# join 점검
+# 1) 전체 통계
+total_calls = len(df)
+calls_with_joins = (df['join_pairs'].str.len() > 0).sum()
+print(f"join_pairs 있는 call: {calls_with_joins:,} / {total_calls:,} ({calls_with_joins/total_calls*100:.1f}%)")
+
+# 2) 샘플 — 어떻게 추출됐는지
+sample = df[df['join_pairs'].str.len() > 0].head(5)
+for _, row in sample.iterrows():
+    print(f"\nfunction: {row['function']}")
+    print(f"tables: {row['tables']}")
+    print(f"join_pairs: {row['join_pairs']}")
+    print(f"sqls[0]: {(row['sqls'] or [''])[0][:300]}")
+    print("---")
+
+# 3) 매칭 검증 — join_pairs의 table이 같은 call의 tables에 실제로 있는지
+matched = 0
+unmatched_examples = []
+total_pairs = 0
+for _, row in df.iterrows():
+    tables_set = set(row['tables'] or [])
+    for pair in (row['join_pairs'] or []):
+        total_pairs += 1
+        ta, ka, tb, kb = pair
+        if ta in tables_set and tb in tables_set:
+            matched += 1
+        elif len(unmatched_examples) < 5:
+            unmatched_examples.append({
+                'function': row['function'],
+                'tables': list(tables_set),
+                'pair': pair,
+            })
+print(f"\njoin_pairs 매칭률: {matched}/{total_pairs} ({matched/max(total_pairs,1)*100:.1f}%)")
+if unmatched_examples:
+    print("\n매칭 실패 샘플:")
+    for ex in unmatched_examples:
+        print(f"  {ex}")
