@@ -522,3 +522,22 @@ df['session_user_id'] = df.apply(lambda r: session_user.get((r['ip'], r['port'])
 
 print(f"매핑된 calls: {df['session_user_id'].notna().sum():,} / {len(df):,}")
 print(f"고유 user: {df['session_user_id'].nunique()}")
+
+# union 추가
+def _union_one(sql):
+    pairs = set()
+    try: parsed = sqlglot.parse_one(sql, dialect='oracle')
+    except: return list(pairs)
+    for u in parsed.find_all(exp.Union):
+        left = u.left
+        right = u.right
+        lt = {(t.name or '').lower() for t in (left.find_all(exp.Table) if left else [])}
+        rt = {(t.name or '').lower() for t in (right.find_all(exp.Table) if right else [])}
+        for a in lt:
+            for b in rt:
+                if a and b and a != b:
+                    pairs.add(tuple(sorted([a, b])))
+    return [list(p) for p in pairs]
+
+df['union_pairs'] = df['sqls'].apply(lambda sqls: [p for s in (sqls or []) for p in _union_one(s)])
+print(f"union 추출된 call: {(df['union_pairs'].str.len() > 0).sum():,}")
