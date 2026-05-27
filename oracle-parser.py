@@ -440,3 +440,57 @@ df['tables'] = df['sqls'].apply(
     lambda sqls: list({t for sql in (sqls or []) for t in _extract(sql)})
 )
 
+# 계정 열결 가능 여부 확인
+import re
+import pandas as pd
+
+# 1) user_id 추출 (= 'x' 형태 + IN (...) 형태)
+USER_ID_EQ = re.compile(r"user_id\s*=\s*'([^']+)'", re.IGNORECASE)
+USER_ID_IN = re.compile(r"user_id\s+in\s*\(([^)]+)\)", re.IGNORECASE)
+
+def extract_user_ids(sqls):
+    found = set()
+    for sql in (sqls or []):
+        for m in USER_ID_EQ.finditer(sql):
+            found.add(m.group(1))
+        for m in USER_ID_IN.finditer(sql):
+            for v in m.group(1).split(','):
+                v = v.strip().strip("'\"")
+                if v: found.add(v)
+    return sorted(found)
+
+# 2) 두 가지 user_id 컬럼
+df['user_ids_all'] = df['sqls'].apply(extract_user_ids)
+df['is_login'] = df['function'].fillna('').str.lower().str.contains('login|sso')
+df['user_ids_login'] = df.apply(
+    lambda r: r['user_ids_all'] if r['is_login'] else [], axis=1
+)
+
+# 3) 세션 (ip, port) 단위 집계
+sess = df.groupby(['ip', 'port']).agg(
+    n_calls=('function', 'size'),
+    user_ids_all=('user_ids_all', lambda L: sorted({u for l in L for u in l})),
+    user_ids_login=('user_ids_login', lambda L: sorted({u for l in L for u in l})),
+    has_login=('is_login', 'any'),
+).reset_index()
+sess['n_users_all'] = sess['user_ids_all'].apply(len)
+sess['n_users_login'] = sess['user_ids_login'].apply(len)
+
+# 4) 리포트
+total = len(sess)
+print(f'총 세션 (ip,port): {total:,}')
+print(f'login function 호출이 있는 세션: {sess["has_login"].sum():,} ({sess["has_login"].mean()*100:.1f}%)')
+print()
+print('--- 관대 (모든 SQL의 user_id) ---')
+mapped_all = (sess['n_users_all'] > 0).sum()
+print(f'매핑된 세션: {mapped_all:,} ({mapped_all/total*100:.1f}%)')
+print(f'매핑 안 된 세션: {total - mapped_all:,}')
+print('세션당 user_id 수 분포:')
+print(sess['n_users_all'].value_counts().sort_index().head(10))
+print()
+print('--- 엄격 (login function의 user_id) ---')
+mapped_login = (sess['n_users_login'] > 0).sum()
+print(f'매핑된 세션: {mapped_login:,} ({mapped_login/total*100:.1f}%)')
+print(f'매핑 안 된 세션: {total - mapped_login:,}')
+print('세션당 user_id 수 분포:')
+print(sess['n_users_login'].value_counts().sort_index().head(10))
