@@ -2424,7 +2424,7 @@ const SUMMARY = (() => {
   // totals
   const totalTables = Object.keys(byTable).length;
   const totalUsers = Object.keys(callsByUser).length;
-  const totalDuration = CALLS.reduce((s, c) => s + (c.duration || 0), 0);
+  const totalDuration = CALLS.reduce((s, c) => s + (c.duration_ms || 0), 0);
 
   // global column counts (across all calls)
   const colTotalCount = {};
