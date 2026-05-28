@@ -291,6 +291,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button data-view="users">USERS</button>
   <button data-view="lineage">LINEAGE</button>
   <button data-view="connect">CONNECT</button>
+  <button data-view="journey">JOURNEY</button>
   <button data-view="summary">SUMMARY</button>
 </div>
 
@@ -2479,22 +2480,23 @@ function renderSummaryView() {
   ctx.fillText('Summary', cx, y);
   y += 50;
 
-  // === BIG NUMBERS (3 columns) ===
-  const colW = Math.min(280, vw / 3.2);
-  const xs = [cx - colW, cx, cx + colW];
+  // === BIG NUMBERS (2 columns) ===
+  const colW = Math.min(280, vw / 3.5);
+  const xs = [cx - colW/2 - colW/2, cx + colW/2 + colW/2 - colW];
+  // (simpler) two columns centered
+  const xs2 = [cx - colW, cx + colW];
   const bigVals = [
     { v: SUMMARY.totalTables.toLocaleString(), label: 'TABLES' },
     { v: SUMMARY.totalUsers.toLocaleString(), label: 'USERS' },
-    { v: fmtInterval(SUMMARY.totalDuration), label: 'TOTAL DURATION' },
   ];
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < bigVals.length; i++) {
     ctx.fillStyle = 'rgba(232, 160, 74, 0.95)';
-    ctx.font = `300 ${Math.min(72, vw/12)}px Fraunces, serif`;
+    ctx.font = `300 ${Math.min(72, vw/10)}px Fraunces, serif`;
     ctx.textAlign = 'center';
-    ctx.fillText(bigVals[i].v, xs[i], y + 60);
+    ctx.fillText(bigVals[i].v, xs2[i], y + 60);
     ctx.fillStyle = 'rgba(139, 134, 128, 0.85)';
     ctx.font = '10px JetBrains Mono';
-    ctx.fillText(bigVals[i].label, xs[i], y + 84);
+    ctx.fillText(bigVals[i].label, xs2[i], y + 84);
   }
   y += 130;
 
@@ -2583,6 +2585,252 @@ function renderSummaryView() {
   }
 }
 
+// =============================================================
+// JOURNEY view — IP packed grid → click for function timeline
+// =============================================================
+
+const IP_META = {};
+for (const r of ipList) {
+  const ip = r.ip;
+  const calls = r.calls;
+  const dsCount = {};
+  for (const c of calls) for (const d of (c.datasources || [])) dsCount[d] = (dsCount[d] || 0) + 1;
+  const domDs = Object.entries(dsCount).sort((a,b) => b[1]-a[1])[0]?.[0] || null;
+  const accounts = new Set();
+  for (const c of calls) if (c.login_user_id) accounts.add(c.login_user_id);
+  const fns = new Set(calls.map(c => c.function));
+  IP_META[ip] = {
+    callCount: calls.length,
+    domDs,
+    accounts: Array.from(accounts),
+    fnCount: fns.size,
+  };
+}
+
+let journeyMode = 'grid';        // 'grid' | 'detail'
+let journeySelectedIP = null;
+let journeyHover = null;          // hovered IP square
+let _journeyCells = [];           // packed grid layout
+let journeyOffY = 0;
+let journeyDragging = false, journeyDragStartY = 0, journeyDragOrigY = 0, journeyDragMoved = false;
+
+function _journeyBuildGrid() {
+  const sqW = 18, sqH = 18, gap = 3;
+  const cols = Math.max(1, Math.floor((vw - 60 + gap) / (sqW + gap)));
+  const top = 130;
+  _journeyCells = ipList.map((r, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    return {
+      ip: r.ip,
+      x: 30 + col * (sqW + gap),
+      y: top + row * (sqH + gap),
+      w: sqW, h: sqH,
+      count: r.count,
+    };
+  });
+}
+_journeyBuildGrid();
+window.addEventListener('resize', _journeyBuildGrid);
+
+function renderJourneyGrid() {
+  // header
+  ctx.fillStyle = 'rgba(245,241,232,0.85)';
+  ctx.font = '300 28px Fraunces, serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Journey', vw/2, 38);
+  ctx.fillStyle = 'rgba(139,134,128,0.85)';
+  ctx.font = '10px JetBrains Mono';
+  ctx.fillText(`${ipList.length} IPs · hover to identify · click to see function journey`, vw/2, 58);
+
+  // hover detection
+  let hover = null;
+  for (const cell of _journeyCells) {
+    const cy = cell.y + journeyOffY;
+    if (cy + cell.h < 100 || cy > vh - 30) continue;
+    if (mouseX >= cell.x && mouseX <= cell.x + cell.w
+     && mouseY >= cy && mouseY <= cy + cell.h) {
+      hover = cell;
+    }
+  }
+  journeyHover = hover;
+
+  // draw squares
+  for (const cell of _journeyCells) {
+    const cy = cell.y + journeyOffY;
+    if (cy + cell.h < 100 || cy > vh - 30) continue;
+    const meta = IP_META[cell.ip] || {};
+    const hue = meta.domDs ? (DS_HUE[meta.domDs] || 0) : 0;
+    const sat = meta.domDs ? 55 : 10;
+    const isHover = hover === cell;
+    ctx.fillStyle = isHover
+      ? `hsla(${hue}, ${sat+15}%, 65%, 1)`
+      : `hsla(${hue}, ${sat}%, 45%, 0.85)`;
+    ctx.fillRect(cell.x, cy, cell.w, cell.h);
+    if (isHover) {
+      ctx.strokeStyle = 'rgba(245,241,232,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(cell.x - 0.5, cy - 0.5, cell.w + 1, cell.h + 1);
+    }
+  }
+
+  // tooltip
+  const tt = document.getElementById('tooltip');
+  if (hover) {
+    const m = IP_META[hover.ip] || {};
+    document.getElementById('tt-ip').textContent = hover.ip;
+    const accStr = m.accounts && m.accounts.length
+      ? `accounts: ${m.accounts.slice(0,4).join(', ')}${m.accounts.length>4?` +${m.accounts.length-4}`:''}`
+      : 'no mapped account';
+    document.getElementById('tt-meta').textContent =
+      `${hover.count.toLocaleString()} calls · ${m.fnCount} functions · ${accStr}`;
+    tt.style.display = 'block';
+    tt.style.left = (mouseX + 14) + 'px';
+    tt.style.top = (mouseY + 14) + 'px';
+    canvas.style.cursor = 'pointer';
+  } else {
+    tt.style.display = 'none';
+    canvas.style.cursor = journeyDragging ? 'grabbing' : 'grab';
+  }
+
+  // legend
+  let lx = 30, ly = vh - 18;
+  ctx.font = '9px JetBrains Mono';
+  ctx.textAlign = 'left';
+  for (const [ds, hue] of Object.entries(DS_HUE)) {
+    ctx.fillStyle = `hsla(${hue}, 55%, 55%, 0.9)`;
+    ctx.fillRect(lx, ly - 7, 10, 10);
+    ctx.fillStyle = 'rgba(180,170,150,0.85)';
+    ctx.fillText(ds, lx + 14, ly + 1);
+    lx += 80;
+  }
+}
+
+function renderJourneyDetail() {
+  const ip = journeySelectedIP;
+  const r = ipList.find(x => x.ip === ip);
+  if (!r) { journeyMode = 'grid'; return; }
+  const meta = IP_META[ip] || {};
+  const calls = r.calls.slice().sort((a, b) => (a._start || 0) - (b._start || 0));
+
+  // header
+  ctx.fillStyle = 'rgba(245,241,232,0.95)';
+  ctx.font = '300 24px Fraunces, serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(ip, 30, 42);
+  ctx.fillStyle = 'rgba(139,134,128,0.85)';
+  ctx.font = '10px JetBrains Mono';
+  const acc = meta.accounts && meta.accounts.length
+    ? `accounts: ${meta.accounts.join(', ')}`
+    : 'no mapped account';
+  ctx.fillText(`${calls.length.toLocaleString()} calls · ${meta.fnCount} functions · ${acc}`, 30, 60);
+  ctx.textAlign = 'right';
+  ctx.fillText('ESC TO GO BACK', vw - 30, 60);
+
+  // time range
+  const validTs = calls.map(c => c._start).filter(t => t != null);
+  if (validTs.length === 0) {
+    ctx.fillStyle = 'rgba(180,170,150,0.8)';
+    ctx.textAlign = 'center';
+    ctx.font = '12px JetBrains Mono';
+    ctx.fillText('No timestamps available for this IP', vw/2, vh/2);
+    return;
+  }
+  const tMin = Math.min(...validTs);
+  const tMax = Math.max(...validTs);
+
+  // function lanes (sorted by frequency desc)
+  const fnFreq = {};
+  for (const c of calls) fnFreq[c.function] = (fnFreq[c.function] || 0) + 1;
+  const lanes = Object.entries(fnFreq).sort((a,b) => b[1] - a[1]).map(([fn]) => fn);
+  const laneIdx = {};
+  lanes.forEach((fn, i) => laneIdx[fn] = i);
+
+  // layout
+  const leftPad = 220, rightPad = 30;
+  const topPad = 90;
+  const laneH = Math.max(18, Math.min(28, (vh - topPad - 60) / Math.max(1, lanes.length)));
+  const plotW = vw - leftPad - rightPad;
+
+  function tx(ts) {
+    if (tMax === tMin) return leftPad + plotW / 2;
+    return leftPad + (ts - tMin) / (tMax - tMin) * plotW;
+  }
+  function ly(fn) {
+    return topPad + (laneIdx[fn] + 0.5) * laneH;
+  }
+
+  // lane backgrounds + labels
+  for (let i = 0; i < lanes.length; i++) {
+    const y0 = topPad + i * laneH;
+    if (y0 > vh - 30) break;
+    if (i % 2 === 0) {
+      ctx.fillStyle = 'rgba(245,241,232,0.025)';
+      ctx.fillRect(leftPad, y0, plotW, laneH);
+    }
+    ctx.strokeStyle = 'rgba(139,134,128,0.12)';
+    ctx.beginPath();
+    ctx.moveTo(leftPad, y0 + laneH); ctx.lineTo(vw - rightPad, y0 + laneH); ctx.stroke();
+
+    // lane label
+    ctx.fillStyle = 'rgba(232,200,150,0.85)';
+    ctx.font = '10px JetBrains Mono';
+    ctx.textAlign = 'right';
+    const fnLabel = lanes[i].length > 26 ? lanes[i].slice(0, 25) + '…' : lanes[i];
+    ctx.fillText(fnLabel, leftPad - 10, y0 + laneH/2 + 3);
+    ctx.fillStyle = 'rgba(180,170,150,0.6)';
+    ctx.font = '8px JetBrains Mono';
+    ctx.textAlign = 'left';
+    ctx.fillText(`×${fnFreq[lanes[i]]}`, leftPad - 6, y0 + laneH/2 + 3);
+  }
+
+  // time axis labels
+  ctx.fillStyle = 'rgba(139,134,128,0.7)';
+  ctx.font = '9px JetBrains Mono';
+  ctx.textAlign = 'left';
+  ctx.fillText(new Date(tMin).toISOString().slice(0, 19).replace('T', ' '), leftPad, topPad - 8);
+  ctx.textAlign = 'right';
+  ctx.fillText(new Date(tMax).toISOString().slice(0, 19).replace('T', ' '), vw - rightPad, topPad - 8);
+
+  // sequence line connecting calls in time order
+  ctx.strokeStyle = 'rgba(232,160,74,0.18)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  let started = false;
+  for (const c of calls) {
+    if (c._start == null || !(c.function in laneIdx)) continue;
+    const x = tx(c._start), y = ly(c.function);
+    if (!started) { ctx.moveTo(x, y); started = true; }
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // call dots
+  for (const c of calls) {
+    if (c._start == null || !(c.function in laneIdx)) continue;
+    const x = tx(c._start), y = ly(c.function);
+    const cache = (c.cache_hit_rate != null && c.cache_hit_rate >= 0.5);
+    ctx.fillStyle = cache ? 'rgba(130,200,150,0.85)' : 'rgba(232,160,74,0.85)';
+    ctx.beginPath();
+    ctx.arc(x, y, 2.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // hint
+  ctx.fillStyle = 'rgba(139,134,128,0.6)';
+  ctx.font = '9px JetBrains Mono';
+  ctx.textAlign = 'left';
+  ctx.fillText('green = cache hit · orange = cache miss · line = time order', leftPad, vh - 18);
+
+  document.getElementById('tooltip').style.display = 'none';
+  canvas.style.cursor = 'default';
+}
+
+function renderJourneyView() {
+  if (journeyMode === 'grid') renderJourneyGrid();
+  else renderJourneyDetail();
+}
+
 
 canvas.addEventListener('wheel', e => {
   if (mainView === 'users') {
@@ -2624,6 +2872,11 @@ canvas.addEventListener('mousedown', e => {
     connectDragStartY = e.clientY;
     connectDragOrigY = connectOffY;
     connectDragMoved = false;
+  } else if (mainView === 'journey' && journeyMode === 'grid') {
+    journeyDragging = true;
+    journeyDragStartY = e.clientY;
+    journeyDragOrigY = journeyOffY;
+    journeyDragMoved = false;
   }
 });
 canvas.addEventListener('mousemove', e => {
@@ -2666,16 +2919,25 @@ canvas.addEventListener('mousemove', e => {
       connectOffY = connectDragOrigY + dy;
     }
   }
+  if (journeyDragging) {
+    const dy = e.clientY - journeyDragStartY;
+    if (!journeyDragMoved && Math.abs(dy) > 4) journeyDragMoved = true;
+    if (journeyDragMoved) {
+      journeyOffY = journeyDragOrigY + dy;
+    }
+  }
 });
 canvas.addEventListener('mouseup', () => {
   usersDragging = false;
   lineageDragging = false;
   connectDragging = false;
+  journeyDragging = false;
 });
 canvas.addEventListener('mouseleave', () => {
   usersDragging = false;
   lineageDragging = false;
   connectDragging = false;
+  journeyDragging = false;
 });
 
 // --- EDGES ---
@@ -2780,6 +3042,12 @@ document.addEventListener('keydown', e => {
       refreshHeader();
       return;
     }
+    if (mainView === 'journey' && journeyMode === 'detail') {
+      journeyMode = 'grid';
+      journeySelectedIP = null;
+      refreshHeader();
+      return;
+    }
   }
 });
 
@@ -2808,6 +3076,11 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
       connectOffY = 0;
       activeDesiredUser = null;
       hoveredDesiredCol = null;
+    }
+    if (mainView === 'journey') {
+      journeyMode = 'grid';
+      journeySelectedIP = null;
+      journeyOffY = 0;
     }
     refreshHeader();
     closePanel();
@@ -2895,6 +3168,20 @@ function refreshHeader() {
     document.getElementById('connect-controls').classList.add('on');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = 'CLICK A PARTICLE FOR DETAILS · DRAG TO SCROLL';
+  } else if (mainView === 'journey') {
+    document.getElementById('title').textContent = 'Journey';
+    document.getElementById('title').classList.remove('ip-mode');
+    document.getElementById('subtitle').textContent = journeyMode === 'grid'
+      ? 'EACH SQUARE = ONE IP · HOVER TO IDENTIFY · CLICK FOR FUNCTION JOURNEY'
+      : 'FUNCTION TIMELINE BY IP · ESC TO GO BACK';
+    document.getElementById('stats').innerHTML = '';
+    document.getElementById('bottom-controls').classList.remove('on');
+    document.getElementById('stream-controls').classList.remove('on');
+    document.getElementById('users-controls').classList.remove('on');
+    document.getElementById('lineage-controls').classList.remove('on');
+    document.getElementById('connect-controls').classList.remove('on');
+    document.getElementById('search-box').classList.remove('on');
+    document.getElementById('hint').textContent = journeyMode === 'grid' ? 'CLICK TO INSPECT · DRAG TO SCROLL' : 'ESC TO GO BACK';
   } else if (mainView === 'summary') {
     document.getElementById('title').textContent = 'Summary';
     document.getElementById('title').classList.remove('ip-mode');
@@ -3235,6 +3522,7 @@ function loop() {
   else if (mainView === 'users') renderUsersView();
   else if (mainView === 'lineage') renderLineageView();
   else if (mainView === 'connect') renderConnectView();
+  else if (mainView === 'journey') renderJourneyView();
   else if (mainView === 'summary') renderSummaryView();
   else if (mainView === 'ips') renderIpParticles();
   else renderTableParticles();
@@ -3274,6 +3562,15 @@ canvas.addEventListener('click', e => {
         const ti = tableList.find(t => t.table === p.key);
         if (ti) openTablePanel({ ...ti, hue: hashHue(ti.table) });
       }
+    }
+    return;
+  }
+  if (mainView === 'journey') {
+    if (journeyDragMoved) { journeyDragMoved = false; return; }
+    if (journeyMode === 'grid' && journeyHover) {
+      journeySelectedIP = journeyHover.ip;
+      journeyMode = 'detail';
+      refreshHeader();
     }
     return;
   }
