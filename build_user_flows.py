@@ -290,6 +290,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button data-view="stream">STREAM</button>
   <button data-view="users">USERS</button>
   <button data-view="lineage">LINEAGE</button>
+  <button data-view="connect">CONNECT</button>
 </div>
 
 <div class="hint" id="hint">CLICK TO INSPECT</div>
@@ -2015,6 +2016,373 @@ function renderLineageView() {
   else renderLineageDetail();
 }
 
+// =============================================================
+// CONNECT view — tables ↔ users with dynamic island
+// =============================================================
+
+// datasource → hue mapping
+const DS_HUE = {
+  'SMARTEES': 30,
+  'sfx': 200,
+  'SMARTLMS': 130,
+  'M14EES': 280,
+  'M15EES': 340,
+};
+function _dsColor(ds, alpha = 0.85) {
+  const h = DS_HUE[ds];
+  if (h == null) return `rgba(160,160,160,${alpha})`;
+  return `hsla(${h}, 55%, 55%, ${alpha})`;
+}
+
+// table → dominant datasource
+const tableDs = {};
+for (const c of CALLS) {
+  const dss = c.datasources || [];
+  for (const t of (c.tables || [])) {
+    if (!tableDs[t]) tableDs[t] = {};
+    for (const ds of dss) tableDs[t][ds] = (tableDs[t][ds] || 0) + 1;
+  }
+}
+function _domDs(table) {
+  const dss = tableDs[table] || {};
+  let best = null, bestC = 0;
+  for (const [ds, c] of Object.entries(dss)) if (c > bestC) { best = ds; bestC = c; }
+  return best;
+}
+
+// users that touched each table (mapped sessions only)
+const usersByTable = {};
+for (const c of CALLS) {
+  const u = c.session_user_id;
+  if (!u) continue;
+  for (const t of (c.tables || [])) {
+    if (!usersByTable[t]) usersByTable[t] = new Set();
+    usersByTable[t].add(u);
+  }
+}
+const tablesByUser = {};
+for (const c of CALLS) {
+  const u = c.session_user_id;
+  if (!u) continue;
+  for (const t of (c.tables || [])) {
+    if (!tablesByUser[u]) tablesByUser[u] = new Set();
+    tablesByUser[u].add(t);
+  }
+}
+
+// build entity lists — caps to keep visible
+const TOP_TABLES = lineageTableItems.slice(0, 50).map(it => ({
+  type: 'table',
+  key: it.key,
+  count: it.count,
+  duration: it.duration,
+  ds: _domDs(it.key),
+}));
+const TOP_USERS = userItemsBase.slice().sort((a,b) => b.count - a.count).slice(0, 50).map(it => ({
+  type: 'user',
+  key: it.key,
+  count: it.count,
+  duration: it.duration,
+}));
+
+// per-entity state {home: {x,y}, phase, target: {x,y}, x, y, visible}
+const connectEntities = new Map();  // `type:key` -> entity state
+
+function _connectInitPositions() {
+  const leftW = vw * 0.45;
+  const rightX0 = vw * 0.55;
+  const top = 130, bot = vh - 40;
+  const usableH = bot - top;
+
+  // tables on the left
+  TOP_TABLES.forEach((t, i) => {
+    const id = 'table:' + t.key;
+    const cols = Math.ceil(Math.sqrt(TOP_TABLES.length * (leftW / usableH)));
+    const rows = Math.ceil(TOP_TABLES.length / cols);
+    const col = i % cols, row = Math.floor(i / cols);
+    const x = (col + 0.5) * (leftW / cols) + 20;
+    const y = top + (row + 0.5) * (usableH / rows);
+    const ent = connectEntities.get(id) || { ...t, phase: i * 1.7, x, y };
+    ent.home = { x, y };
+    ent.target = { x, y };
+    ent.visible = true;
+    connectEntities.set(id, ent);
+  });
+
+  // users on the right
+  TOP_USERS.forEach((u, i) => {
+    const id = 'user:' + u.key;
+    const availW = vw - rightX0 - 20;
+    const cols = Math.ceil(Math.sqrt(TOP_USERS.length * (availW / usableH)));
+    const rows = Math.ceil(TOP_USERS.length / cols);
+    const col = i % cols, row = Math.floor(i / cols);
+    const x = rightX0 + (col + 0.5) * (availW / cols);
+    const y = top + (row + 0.5) * (usableH / rows);
+    const ent = connectEntities.get(id) || { ...u, phase: i * 1.3, x, y };
+    ent.home = { x, y };
+    ent.target = { x, y };
+    ent.visible = true;
+    connectEntities.set(id, ent);
+  });
+}
+_connectInitPositions();
+window.addEventListener('resize', _connectInitPositions);
+
+let connectSelected = null;  // {type, key} or null
+let connectHover = null;
+let _connectLastTime = performance.now();
+
+function _connectUpdate(time, dtMs) {
+  // compute targets based on selection
+  const islandCx = vw / 2;
+  const islandCy = 75;
+  const ringR = Math.min(vw, vh) * 0.32;
+
+  if (connectSelected) {
+    const selId = connectSelected.type + ':' + connectSelected.key;
+    const selEnt = connectEntities.get(selId);
+
+    // determine related entities
+    let related = [];
+    if (connectSelected.type === 'table') {
+      const users = usersByTable[connectSelected.key] || new Set();
+      for (const u of users) {
+        const id = 'user:' + u;
+        if (connectEntities.has(id)) related.push(connectEntities.get(id));
+      }
+    } else {
+      const tables = tablesByUser[connectSelected.key] || new Set();
+      for (const t of tables) {
+        const id = 'table:' + t;
+        if (connectEntities.has(id)) related.push(connectEntities.get(id));
+      }
+    }
+    related.sort((a, b) => b.count - a.count);
+    related = related.slice(0, 40);
+
+    // selected → into island
+    for (const [id, ent] of connectEntities) {
+      if (id === selId) {
+        ent.target = { x: islandCx, y: islandCy };
+        ent.visible = true;
+      } else if (related.includes(ent)) {
+        const idx = related.indexOf(ent);
+        const angle = (idx / related.length) * Math.PI - Math.PI / 2 + (Math.PI / 2);
+        ent.target = {
+          x: islandCx + Math.cos(angle) * ringR,
+          y: islandCy + Math.sin(angle) * ringR + 60,
+        };
+        ent.visible = true;
+      } else {
+        // fade out
+        ent.target = { x: ent.home.x, y: ent.home.y };
+        ent.visible = false;
+      }
+    }
+  } else {
+    // floating around home
+    for (const [, ent] of connectEntities) {
+      const t = time / 1000;
+      const dx = Math.sin(t * 0.5 + ent.phase) * 12;
+      const dy = Math.cos(t * 0.4 + ent.phase * 1.3) * 9;
+      ent.target = { x: ent.home.x + dx, y: ent.home.y + dy };
+      ent.visible = true;
+    }
+  }
+
+  // ease toward target
+  const k = Math.min(1, dtMs / 1000 * 5);
+  for (const [, ent] of connectEntities) {
+    ent.x += (ent.target.x - ent.x) * k;
+    ent.y += (ent.target.y - ent.y) * k;
+    ent.alpha = (ent.alpha == null) ? (ent.visible ? 1 : 0.15) : ent.alpha;
+    const tAlpha = ent.visible ? 1 : 0.12;
+    ent.alpha += (tAlpha - ent.alpha) * k;
+  }
+}
+
+function _drawTableBox(ent, isSelected, isHover) {
+  const w = 110, h = 26;
+  const x = ent.x - w/2, y = ent.y - h/2;
+  const hue = ent.ds ? (DS_HUE[ent.ds] || 0) : 220;
+  const sat = ent.ds ? 55 : 20;
+
+  if (isSelected) {
+    ctx.fillStyle = `hsla(${hue}, ${sat+10}%, 60%, ${ent.alpha})`;
+    ctx.strokeStyle = 'rgba(245,241,232,0.95)';
+    ctx.lineWidth = 2;
+  } else if (isHover) {
+    ctx.fillStyle = `hsla(${hue}, ${sat}%, 50%, ${ent.alpha})`;
+    ctx.strokeStyle = 'rgba(245,241,232,0.7)';
+    ctx.lineWidth = 1.5;
+  } else {
+    ctx.fillStyle = `hsla(${hue}, ${sat}%, 40%, ${ent.alpha * 0.85})`;
+    ctx.strokeStyle = `hsla(${hue}, ${sat}%, 55%, ${ent.alpha * 0.7})`;
+    ctx.lineWidth = 1;
+  }
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeRect(x, y, w, h);
+
+  ctx.fillStyle = `rgba(245,241,232,${ent.alpha * 0.95})`;
+  ctx.font = '10px JetBrains Mono';
+  ctx.textAlign = 'center';
+  const txt = ent.key.length > 16 ? ent.key.slice(0, 15) + '…' : ent.key;
+  ctx.fillText(txt, ent.x, ent.y + 4);
+}
+
+function _drawUserDot(ent, isSelected, isHover) {
+  const r = isSelected ? 18 : (isHover ? 12 : 9);
+  ctx.fillStyle = isSelected
+    ? `rgba(232, 160, 74, ${ent.alpha})`
+    : isHover
+      ? `rgba(232, 200, 130, ${ent.alpha})`
+      : `rgba(180, 160, 130, ${ent.alpha * 0.85})`;
+  ctx.beginPath();
+  ctx.arc(ent.x, ent.y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = `rgba(245,241,232,${ent.alpha * 0.4})`;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  if (isSelected || isHover) {
+    ctx.fillStyle = `rgba(245,241,232,${ent.alpha})`;
+    ctx.font = '9px JetBrains Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText(ent.key, ent.x, ent.y + r + 12);
+  }
+}
+
+function _drawConnectionLine(ent, islandCx, islandCy) {
+  const fromX = ent.x, fromY = ent.y;
+  const toX = islandCx, toY = islandCy + 18;
+  ctx.strokeStyle = `rgba(232,160,74,${0.35 * ent.alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(fromX, fromY);
+  ctx.bezierCurveTo(fromX, (fromY+toY)/2, toX, (fromY+toY)/2, toX, toY);
+  ctx.stroke();
+}
+
+function _drawIsland() {
+  if (!connectSelected) return;
+  const cx = vw / 2, cy = 75;
+  const w = 280, h = 60;
+  // pill shape
+  ctx.fillStyle = 'rgba(10, 10, 12, 0.92)';
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(cx - w/2, cy - h/2, w, h, h/2) : (() => {
+    ctx.moveTo(cx - w/2 + h/2, cy - h/2);
+    ctx.lineTo(cx + w/2 - h/2, cy - h/2);
+    ctx.arc(cx + w/2 - h/2, cy, h/2, -Math.PI/2, Math.PI/2);
+    ctx.lineTo(cx - w/2 + h/2, cy + h/2);
+    ctx.arc(cx - w/2 + h/2, cy, h/2, Math.PI/2, -Math.PI/2);
+  })();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(232,160,74,0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function renderConnectView() {
+  const now = performance.now();
+  const dtMs = Math.min(100, now - _connectLastTime);
+  _connectLastTime = now;
+  _connectUpdate(now, dtMs);
+
+  // header
+  ctx.fillStyle = 'rgba(245,241,232,0.85)';
+  ctx.font = '300 28px Fraunces, serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Connections', vw/2, 38);
+  ctx.fillStyle = 'rgba(139,134,128,0.85)';
+  ctx.font = '10px JetBrains Mono';
+  ctx.fillText('left: tables (color by datasource) · right: users · click any to pull related into the island', vw/2, 58);
+
+  // datasource legend
+  let lx = 30, ly = vh - 18;
+  ctx.font = '9px JetBrains Mono';
+  ctx.textAlign = 'left';
+  for (const [ds, hue] of Object.entries(DS_HUE)) {
+    ctx.fillStyle = `hsla(${hue}, 55%, 55%, 0.9)`;
+    ctx.fillRect(lx, ly - 7, 10, 10);
+    ctx.fillStyle = 'rgba(180,170,150,0.85)';
+    ctx.fillText(ds, lx + 14, ly + 1);
+    lx += 80;
+  }
+
+  // connection lines (under entities)
+  if (connectSelected) {
+    const cx = vw / 2, cy = 75;
+    for (const [, ent] of connectEntities) {
+      if (ent.alpha < 0.3) continue;
+      if (ent.type === connectSelected.type && ent.key === connectSelected.key) continue;
+      _drawConnectionLine(ent, cx, cy);
+    }
+  }
+
+  // hover detection
+  let hover = null;
+  for (const [, ent] of connectEntities) {
+    if (ent.alpha < 0.3) continue;
+    if (ent.type === 'table') {
+      const w = 110, h = 26;
+      if (mouseX >= ent.x - w/2 && mouseX <= ent.x + w/2
+       && mouseY >= ent.y - h/2 && mouseY <= ent.y + h/2) hover = ent;
+    } else {
+      const r = 12;
+      if (Math.hypot(mouseX - ent.x, mouseY - ent.y) < r) hover = ent;
+    }
+  }
+  connectHover = hover;
+
+  // draw entities (tables first, users on top)
+  for (const [, ent] of connectEntities) {
+    const isSel = connectSelected && ent.type === connectSelected.type && ent.key === connectSelected.key;
+    const isHov = hover === ent;
+    if (ent.type === 'table') _drawTableBox(ent, isSel, isHov);
+  }
+  for (const [, ent] of connectEntities) {
+    const isSel = connectSelected && ent.type === connectSelected.type && ent.key === connectSelected.key;
+    const isHov = hover === ent;
+    if (ent.type === 'user') _drawUserDot(ent, isSel, isHov);
+  }
+
+  // dynamic island (on top of everything)
+  _drawIsland();
+  if (connectSelected) {
+    const sel = connectSelected;
+    ctx.fillStyle = 'rgba(245,241,232,0.95)';
+    ctx.font = 'bold 11px JetBrains Mono';
+    ctx.textAlign = 'center';
+    const label = (sel.type === 'table' ? 'TABLE  ' : 'USER  ') + sel.key;
+    const lbl = label.length > 30 ? label.slice(0, 29) + '…' : label;
+    ctx.fillText(lbl, vw/2, 70);
+    ctx.fillStyle = 'rgba(232,160,74,0.85)';
+    ctx.font = '9px JetBrains Mono';
+    const related = sel.type === 'table'
+      ? (usersByTable[sel.key] ? usersByTable[sel.key].size : 0) + ' users'
+      : (tablesByUser[sel.key] ? tablesByUser[sel.key].size : 0) + ' tables';
+    ctx.fillText(related + ' · ESC to release', vw/2, 86);
+  }
+
+  // tooltip on hover
+  const tt = document.getElementById('tooltip');
+  if (hover && !(connectSelected && hover.type === connectSelected.type && hover.key === connectSelected.key)) {
+    document.getElementById('tt-ip').textContent = (hover.type === 'table' ? 'TABLE ' : 'USER ') + hover.key;
+    const meta = hover.type === 'table'
+      ? `${hover.count.toLocaleString()} calls · ${fmtInterval(hover.duration)} · ds: ${hover.ds || '—'}`
+      : `${hover.count.toLocaleString()} calls · ${fmtInterval(hover.duration)}`;
+    document.getElementById('tt-meta').textContent = meta;
+    tt.style.display = 'block';
+    tt.style.left = (mouseX + 14) + 'px';
+    tt.style.top = (mouseY + 14) + 'px';
+    canvas.style.cursor = 'pointer';
+  } else {
+    tt.style.display = 'none';
+    canvas.style.cursor = connectSelected ? 'default' : 'crosshair';
+  }
+}
+
 canvas.addEventListener('wheel', e => {
   if (mainView === 'users') {
     e.preventDefault();
@@ -2189,6 +2557,10 @@ document.addEventListener('keydown', e => {
       lineageMode = 'treemap';
       lineageSelected = null;
       refreshHeader();
+      return;
+    }
+    if (mainView === 'connect' && connectSelected) {
+      connectSelected = null;
       return;
     }
   }
@@ -2611,6 +2983,7 @@ function loop() {
   }
   else if (mainView === 'users') renderUsersView();
   else if (mainView === 'lineage') renderLineageView();
+  else if (mainView === 'connect') renderConnectView();
   else if (mainView === 'ips') renderIpParticles();
   else renderTableParticles();
   requestAnimationFrame(loop);
@@ -2626,6 +2999,12 @@ canvas.addEventListener('click', e => {
   if (mainView === 'users') {
     if (usersDragMoved) { usersDragMoved = false; return; }
     if (_userHover) openUserDetailPanel(_userHover);
+    return;
+  }
+  if (mainView === 'connect') {
+    if (connectHover) {
+      connectSelected = { type: connectHover.type, key: connectHover.key };
+    }
     return;
   }
   if (mainView === 'lineage') {
