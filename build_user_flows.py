@@ -346,6 +346,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button data-lmetric="duration">BY DURATION</button>
 </div>
 
+<div class="bottom-controls" id="connect-controls" style="left: 28px;">
+  <button data-cmode="tables" class="active">TABLE CELLS</button>
+  <button data-cmode="users">USER CELLS</button>
+</div>
+
 <div class="tooltip" id="tooltip">
   <div class="ip" id="tt-ip"></div>
   <div class="meta" id="tt-meta"></div>
@@ -1232,6 +1237,19 @@ document.querySelectorAll('#lineage-controls button[data-lmetric]').forEach(btn 
   });
 });
 
+document.addEventListener('DOMContentLoaded', () => {});
+window.addEventListener('load', () => {
+  document.querySelectorAll('#connect-controls button[data-cmode]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      connectMode = btn.dataset.cmode;
+      document.querySelectorAll('#connect-controls button[data-cmode]').forEach(b =>
+        b.classList.toggle('active', b === btn));
+      connectOffY = 0;
+      _buildCells();
+    });
+  });
+});
+
 // --- LINEAGE view ---
 const lineageJoins = {};
 const lineageNext = {};
@@ -2017,10 +2035,9 @@ function renderLineageView() {
 }
 
 // =============================================================
-// CONNECT view — tables ↔ users with dynamic island
+// CONNECT view — Word-table style cells, related particles floating inside
 // =============================================================
 
-// datasource → hue mapping
 const DS_HUE = {
   'SMARTEES': 30,
   'sfx': 200,
@@ -2028,13 +2045,7 @@ const DS_HUE = {
   'M14EES': 280,
   'M15EES': 340,
 };
-function _dsColor(ds, alpha = 0.85) {
-  const h = DS_HUE[ds];
-  if (h == null) return `rgba(160,160,160,${alpha})`;
-  return `hsla(${h}, 55%, 55%, ${alpha})`;
-}
 
-// table → dominant datasource
 const tableDs = {};
 for (const c of CALLS) {
   const dss = c.datasources || [];
@@ -2050,287 +2061,178 @@ function _domDs(table) {
   return best;
 }
 
-// users that touched each table (mapped sessions only)
-const usersByTable = {};
+// usage cross-references
+const _usersByTableCount = {};   // table -> {user: callCount}
+const _tablesByUserCount = {};   // user -> {table: callCount}
 for (const c of CALLS) {
   const u = c.session_user_id;
   if (!u) continue;
   for (const t of (c.tables || [])) {
-    if (!usersByTable[t]) usersByTable[t] = new Set();
-    usersByTable[t].add(u);
-  }
-}
-const tablesByUser = {};
-for (const c of CALLS) {
-  const u = c.session_user_id;
-  if (!u) continue;
-  for (const t of (c.tables || [])) {
-    if (!tablesByUser[u]) tablesByUser[u] = new Set();
-    tablesByUser[u].add(t);
+    if (!_usersByTableCount[t]) _usersByTableCount[t] = {};
+    _usersByTableCount[t][u] = (_usersByTableCount[t][u] || 0) + 1;
+    if (!_tablesByUserCount[u]) _tablesByUserCount[u] = {};
+    _tablesByUserCount[u][t] = (_tablesByUserCount[u][t] || 0) + 1;
   }
 }
 
-// build entity lists — caps to keep visible
-const TOP_TABLES = lineageTableItems.slice(0, 50).map(it => ({
-  type: 'table',
-  key: it.key,
-  count: it.count,
-  duration: it.duration,
-  ds: _domDs(it.key),
+// entity catalogs
+const TOP_TABLES = lineageTableItems.slice(0, 60).map(it => ({
+  type: 'table', key: it.key, count: it.count, duration: it.duration, ds: _domDs(it.key),
 }));
-const TOP_USERS = userItemsBase.slice().sort((a,b) => b.count - a.count).slice(0, 50).map(it => ({
-  type: 'user',
-  key: it.key,
-  count: it.count,
-  duration: it.duration,
+const TOP_USERS = userItemsBase.slice().sort((a,b) => b.count - a.count).slice(0, 60).map(it => ({
+  type: 'user', key: it.key, count: it.count, duration: it.duration,
 }));
 
-// per-entity state {home: {x,y}, phase, target: {x,y}, x, y, visible}
-const connectEntities = new Map();  // `type:key` -> entity state
-
-const MAX_TABLE_COUNT = Math.max(1, ...TOP_TABLES.map(t => t.count));
-const MAX_USER_COUNT = Math.max(1, ...TOP_USERS.map(u => u.count));
-
-function _connectInitPositions() {
-  const cellW = 110, cellH = 90, gap = 6;
-  const halfW = vw / 2;
-  const top = 130;
-
-  // 좌측: 테이블 그리드
-  const leftAvail = halfW - 30;
-  const leftCols = Math.max(1, Math.floor((leftAvail + gap) / (cellW + gap)));
-  TOP_TABLES.forEach((t, i) => {
-    const id = 'table:' + t.key;
-    const col = i % leftCols;
-    const row = Math.floor(i / leftCols);
-    const x = 15 + col * (cellW + gap) + cellW / 2;
-    const y = top + row * (cellH + gap) + cellH / 2;
-    const frac = Math.sqrt(t.count / MAX_TABLE_COUNT);
-    const ent = connectEntities.get(id) || {
-      ...t,
-      phase: i * 1.7,
-      phase2: i * 2.3 + 0.7,
-      x, y,
-    };
-    ent.home = { x, y };
-    ent.cellW = cellW;
-    ent.cellH = cellH;
-    ent.target = { x, y };
-    ent.rx = 28 + frac * 25;
-    ent.ry = 9 + frac * 10;
-    ent.visible = true;
-    connectEntities.set(id, ent);
-  });
-
-  // 우측: 사용자 그리드
-  const rightAvail = halfW - 30;
-  const rightCols = Math.max(1, Math.floor((rightAvail + gap) / (cellW + gap)));
-  const rightX0 = halfW + 15;
-  TOP_USERS.forEach((u, i) => {
-    const id = 'user:' + u.key;
-    const col = i % rightCols;
-    const row = Math.floor(i / rightCols);
-    const x = rightX0 + col * (cellW + gap) + cellW / 2;
-    const y = top + row * (cellH + gap) + cellH / 2;
-    const frac = Math.sqrt(u.count / MAX_USER_COUNT);
-    const ent = connectEntities.get(id) || {
-      ...u,
-      phase: i * 1.3,
-      phase2: i * 1.9 + 0.4,
-      x, y,
-    };
-    ent.home = { x, y };
-    ent.cellW = cellW;
-    ent.cellH = cellH;
-    ent.target = { x, y };
-    ent.radius = 10 + frac * 18;
-    ent.visible = true;
-    connectEntities.set(id, ent);
-  });
-}
-_connectInitPositions();
-window.addEventListener('resize', _connectInitPositions);
-
-let connectSelected = null;  // {type, key} or null
-let connectHover = null;
-let _connectLastTime = performance.now();
+let connectMode = 'tables';   // 'tables' | 'users'
 let connectOffY = 0;
 let connectDragging = false;
 let connectDragStartY = 0, connectDragOrigY = 0, connectDragMoved = false;
+let connectHover = null;       // {kind: 'cell'|'particle', cellKey, particleKey?}
+let _connectLastTime = performance.now();
 
-function _connectUpdate(time, dtMs) {
-  // compute targets based on selection
-  const islandCx = vw / 2;
-  const islandCy = 75;
-  const ringR = Math.min(vw, vh) * 0.32;
+// Cell + particle state (rebuilt on mode change / resize)
+const CELL_W = 200, CELL_H = 150, CELL_HEADER = 32, CELL_GAP = 8;
+let _cells = [];               // [{key, x, y, w, h, count, ds, type, particles: [...]}]
 
-  if (connectSelected) {
-    const selId = connectSelected.type + ':' + connectSelected.key;
-    const selEnt = connectEntities.get(selId);
+function _buildCells() {
+  const items = connectMode === 'tables' ? TOP_TABLES : TOP_USERS;
+  const cols = Math.max(1, Math.floor((vw - 30 + CELL_GAP) / (CELL_W + CELL_GAP)));
+  const top = 130;
+  _cells = items.map((it, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = 15 + col * (CELL_W + CELL_GAP);
+    const y = top + row * (CELL_H + CELL_GAP);
 
-    // determine related entities
-    let related = [];
-    if (connectSelected.type === 'table') {
-      const users = usersByTable[connectSelected.key] || new Set();
-      for (const u of users) {
-        const id = 'user:' + u;
-        if (connectEntities.has(id)) related.push(connectEntities.get(id));
-      }
+    // related particles
+    let particles = [];
+    if (connectMode === 'tables') {
+      const usersMap = _usersByTableCount[it.key] || {};
+      particles = Object.entries(usersMap).map(([u, c]) => ({
+        key: u, count: c, type: 'user',
+      }));
     } else {
-      const tables = tablesByUser[connectSelected.key] || new Set();
-      for (const t of tables) {
-        const id = 'table:' + t;
-        if (connectEntities.has(id)) related.push(connectEntities.get(id));
-      }
+      const tablesMap = _tablesByUserCount[it.key] || {};
+      particles = Object.entries(tablesMap).map(([t, c]) => ({
+        key: t, count: c, type: 'table', ds: _domDs(t),
+      }));
     }
-    related.sort((a, b) => b.count - a.count);
-    related = related.slice(0, 40);
+    particles.sort((a, b) => b.count - a.count);
+    particles = particles.slice(0, 24);
 
-    // selected → into island
-    for (const [id, ent] of connectEntities) {
-      if (id === selId) {
-        ent.target = { x: islandCx, y: islandCy };
-        ent.visible = true;
-      } else if (related.includes(ent)) {
-        const idx = related.indexOf(ent);
-        const angle = (idx / related.length) * Math.PI - Math.PI / 2 + (Math.PI / 2);
-        ent.target = {
-          x: islandCx + Math.cos(angle) * ringR,
-          y: islandCy + Math.sin(angle) * ringR + 60,
+    // layout home positions inside cell
+    const px0 = x + 6, py0 = y + CELL_HEADER + 6;
+    const pw = CELL_W - 12, ph = CELL_H - CELL_HEADER - 10;
+    const n = particles.length;
+    if (n > 0) {
+      const pCols = Math.max(1, Math.ceil(Math.sqrt(n * pw / ph)));
+      const pRows = Math.ceil(n / pCols);
+      particles.forEach((p, j) => {
+        const c2 = j % pCols, r2 = Math.floor(j / pCols);
+        p.home = {
+          x: px0 + (c2 + 0.5) * (pw / pCols),
+          y: py0 + (r2 + 0.5) * (ph / pRows),
         };
-        ent.visible = true;
-      } else {
-        // fade out
-        ent.target = { x: ent.home.x, y: ent.home.y };
-        ent.visible = false;
-      }
+        p.phase = j * 1.7 + i * 0.3;
+        p.phase2 = j * 2.3 + 0.5;
+        p.x = p.home.x;
+        p.y = p.home.y;
+      });
     }
-  } else {
-    // floating inside cell — bounded by cell size
-    for (const [, ent] of connectEntities) {
-      const t = time / 1000;
-      const ampX = (ent.cellW || 100) * 0.18;
-      const ampY = (ent.cellH || 80) * 0.16;
-      const dx = Math.sin(t * 0.7 + ent.phase) * ampX
-               + Math.cos(t * 1.15 + ent.phase2) * ampX * 0.4;
-      const dy = Math.cos(t * 0.6 + ent.phase * 0.7) * ampY
-               + Math.sin(t * 0.95 + ent.phase2 * 1.1) * ampY * 0.4;
-      ent.target = { x: ent.home.x + dx, y: ent.home.y + dy };
-      ent.visible = true;
+
+    return { ...it, x, y, w: CELL_W, h: CELL_H, particles };
+  });
+}
+_buildCells();
+window.addEventListener('resize', _buildCells);
+
+function _updateParticles(time) {
+  const t = time / 1000;
+  for (const cell of _cells) {
+    for (const p of cell.particles) {
+      const dx = Math.sin(t * 0.7 + p.phase) * 5 + Math.cos(t * 1.1 + p.phase2) * 2.5;
+      const dy = Math.cos(t * 0.6 + p.phase) * 3.5 + Math.sin(t * 0.9 + p.phase2) * 2;
+      p.x = p.home.x + dx;
+      p.y = p.home.y + dy;
     }
   }
-
-  // ease toward target
-  const k = Math.min(1, dtMs / 1000 * 3.5);
-  for (const [, ent] of connectEntities) {
-    ent.x += (ent.target.x - ent.x) * k;
-    ent.y += (ent.target.y - ent.y) * k;
-    ent.alpha = (ent.alpha == null) ? (ent.visible ? 1 : 0.15) : ent.alpha;
-    const tAlpha = ent.visible ? 1 : 0.12;
-    ent.alpha += (tAlpha - ent.alpha) * k;
-  }
 }
 
-function _drawTableBox(ent, isSelected, isHover) {
-  const rx = ent.rx || 55;
-  const ry = ent.ry || 16;
-  const cy = ent.y + (isSelected ? 0 : connectOffY);
-  const hue = ent.ds ? (DS_HUE[ent.ds] || 0) : 220;
-  const sat = ent.ds ? 55 : 20;
+function _drawCell(cell, hoverParticle) {
+  const cy = cell.y + connectOffY;
+  // skip if off-screen
+  if (cy + cell.h < 100 || cy > vh) return;
 
-  ctx.beginPath();
-  ctx.ellipse(ent.x, cy, rx, ry, 0, 0, Math.PI * 2);
+  const hue = connectMode === 'tables'
+    ? (DS_HUE[cell.ds] || 220)
+    : 30;
 
-  if (isSelected) {
-    ctx.fillStyle = `hsla(${hue}, ${sat+10}%, 60%, ${ent.alpha})`;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(245,241,232,0.95)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  } else if (isHover) {
-    ctx.fillStyle = `hsla(${hue}, ${sat}%, 52%, ${ent.alpha})`;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(245,241,232,0.7)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  } else {
-    ctx.fillStyle = `hsla(${hue}, ${sat}%, 42%, ${ent.alpha * 0.85})`;
-    ctx.fill();
-    ctx.strokeStyle = `hsla(${hue}, ${sat}%, 60%, ${ent.alpha * 0.7})`;
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
-
-  ctx.fillStyle = `rgba(245,241,232,${ent.alpha * 0.95})`;
-  const fontSize = Math.max(8, Math.min(12, ry * 0.7));
-  ctx.font = `${fontSize}px JetBrains Mono`;
-  ctx.textAlign = 'center';
-  const maxChars = Math.floor((rx * 2 - 10) / (fontSize * 0.6));
-  const txt = ent.key.length > maxChars ? ent.key.slice(0, Math.max(1, maxChars - 1)) + '…' : ent.key;
-  ctx.fillText(txt, ent.x, cy + fontSize / 3);
-}
-
-function _drawUserDot(ent, isSelected, isHover) {
-  const baseR = ent.radius || 9;
-  const r = isSelected ? baseR * 1.6 : (isHover ? baseR * 1.25 : baseR);
-  const cy = ent.y + (isSelected ? 0 : connectOffY);
-  ctx.fillStyle = isSelected
-    ? `rgba(232, 160, 74, ${ent.alpha})`
-    : isHover
-      ? `rgba(232, 200, 130, ${ent.alpha})`
-      : `rgba(180, 160, 130, ${ent.alpha * 0.85})`;
-  ctx.beginPath();
-  ctx.arc(ent.x, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = `rgba(245,241,232,${ent.alpha * 0.4})`;
+  // body
+  ctx.fillStyle = 'rgba(28, 26, 24, 0.6)';
+  ctx.fillRect(cell.x, cy, cell.w, cell.h);
+  ctx.strokeStyle = 'rgba(139, 134, 128, 0.4)';
   ctx.lineWidth = 1;
-  ctx.stroke();
+  ctx.strokeRect(cell.x, cy, cell.w, cell.h);
 
-  if (isSelected || isHover) {
-    ctx.fillStyle = `rgba(245,241,232,${ent.alpha})`;
-    ctx.font = '9px JetBrains Mono';
-    ctx.textAlign = 'center';
-    ctx.fillText(ent.key, ent.x, cy + r + 12);
+  // header bg
+  ctx.fillStyle = `hsla(${hue}, 50%, 32%, 0.7)`;
+  ctx.fillRect(cell.x, cy, cell.w, CELL_HEADER);
+  ctx.strokeRect(cell.x, cy, cell.w, CELL_HEADER);
+
+  // header text
+  ctx.fillStyle = 'rgba(245,241,232,0.95)';
+  ctx.font = 'bold 11px JetBrains Mono';
+  ctx.textAlign = 'left';
+  const prefix = connectMode === 'tables' ? '' : 'USER ';
+  const txt = prefix + cell.key;
+  const maxChars = Math.floor((cell.w - 70) / 7);
+  const shown = txt.length > maxChars ? txt.slice(0, maxChars - 1) + '…' : txt;
+  ctx.fillText(shown, cell.x + 8, cy + 14);
+
+  // sub info
+  ctx.fillStyle = 'rgba(232, 200, 150, 0.8)';
+  ctx.font = '9px JetBrains Mono';
+  ctx.fillText(
+    `${cell.count.toLocaleString()} calls · ${cell.particles.length} ${connectMode === 'tables' ? 'users' : 'tables'}`,
+    cell.x + 8, cy + 26
+  );
+
+  // datasource tag (right side, tables mode)
+  if (connectMode === 'tables' && cell.ds) {
+    ctx.fillStyle = `hsla(${hue}, 55%, 70%, 0.95)`;
+    ctx.font = '8px JetBrains Mono';
+    ctx.textAlign = 'right';
+    ctx.fillText(cell.ds, cell.x + cell.w - 8, cy + 14);
   }
-}
 
-function _drawConnectionLine(ent, islandCx, islandCy) {
-  const fromX = ent.x;
-  const fromY = ent.y + connectOffY;
-  const toX = islandCx, toY = islandCy + 18;
-  ctx.strokeStyle = `rgba(232,160,74,${0.35 * ent.alpha})`;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(fromX, fromY);
-  ctx.bezierCurveTo(fromX, (fromY+toY)/2, toX, (fromY+toY)/2, toX, toY);
-  ctx.stroke();
-}
-
-function _drawIsland() {
-  if (!connectSelected) return;
-  const cx = vw / 2, cy = 75;
-  const w = 280, h = 60;
-  // pill shape
-  ctx.fillStyle = 'rgba(10, 10, 12, 0.92)';
-  ctx.beginPath();
-  ctx.roundRect ? ctx.roundRect(cx - w/2, cy - h/2, w, h, h/2) : (() => {
-    ctx.moveTo(cx - w/2 + h/2, cy - h/2);
-    ctx.lineTo(cx + w/2 - h/2, cy - h/2);
-    ctx.arc(cx + w/2 - h/2, cy, h/2, -Math.PI/2, Math.PI/2);
-    ctx.lineTo(cx - w/2 + h/2, cy + h/2);
-    ctx.arc(cx - w/2 + h/2, cy, h/2, Math.PI/2, -Math.PI/2);
-  })();
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(232,160,74,0.5)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
+  // particles
+  for (const p of cell.particles) {
+    const py = p.y + connectOffY;
+    const r = Math.max(2.5, Math.min(7, 1.5 + Math.sqrt(p.count)));
+    const isHover = hoverParticle === p;
+    let color;
+    if (connectMode === 'tables') {
+      color = isHover ? 'rgba(245, 220, 180, 1)' : 'rgba(220, 180, 140, 0.85)';
+    } else {
+      const phue = p.ds ? (DS_HUE[p.ds] || 220) : 220;
+      color = isHover ? `hsla(${phue}, 70%, 70%, 1)` : `hsla(${phue}, 55%, 55%, 0.85)`;
+    }
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(p.x, py, isHover ? r + 1.5 : r, 0, Math.PI * 2);
+    ctx.fill();
+    if (isHover) {
+      ctx.strokeStyle = 'rgba(245,241,232,0.8)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
 }
 
 function renderConnectView() {
   const now = performance.now();
-  const dtMs = Math.min(100, now - _connectLastTime);
   _connectLastTime = now;
-  _connectUpdate(now, dtMs);
+  _updateParticles(now);
 
   // header
   ctx.fillStyle = 'rgba(245,241,232,0.85)';
@@ -2339,7 +2241,10 @@ function renderConnectView() {
   ctx.fillText('Connections', vw/2, 38);
   ctx.fillStyle = 'rgba(139,134,128,0.85)';
   ctx.font = '10px JetBrains Mono';
-  ctx.fillText('left: tables (color by datasource) · right: users · click any to pull related into the island', vw/2, 58);
+  const sub = connectMode === 'tables'
+    ? 'each cell = one TABLE · particles inside = users who touched it · drag to scroll'
+    : 'each cell = one USER · particles inside = tables they used · drag to scroll';
+  ctx.fillText(sub, vw/2, 58);
 
   // datasource legend
   let lx = 30, ly = vh - 18;
@@ -2353,82 +2258,41 @@ function renderConnectView() {
     lx += 80;
   }
 
-  // connection lines (under entities)
-  if (connectSelected) {
-    const cx = vw / 2, cy = 75;
-    for (const [, ent] of connectEntities) {
-      if (ent.alpha < 0.3) continue;
-      if (ent.type === connectSelected.type && ent.key === connectSelected.key) continue;
-      _drawConnectionLine(ent, cx, cy);
-    }
-  }
-
   // hover detection
-  let hover = null;
-  for (const [, ent] of connectEntities) {
-    if (ent.alpha < 0.3) continue;
-    const isSel = connectSelected && ent.type === connectSelected.type && ent.key === connectSelected.key;
-    const ey = ent.y + (isSel ? 0 : connectOffY);
-    if (ent.type === 'table') {
-      const rx = ent.rx || 55;
-      const ry = ent.ry || 16;
-      const dx = (mouseX - ent.x) / rx;
-      const dy = (mouseY - ey) / ry;
-      if (dx * dx + dy * dy <= 1) hover = ent;
-    } else {
-      const r = (ent.radius || 9) * 1.4;
-      if (Math.hypot(mouseX - ent.x, mouseY - ey) < r) hover = ent;
+  let hover = null, hoverCell = null;
+  for (const cell of _cells) {
+    const cy = cell.y + connectOffY;
+    if (cy + cell.h < 100 || cy > vh) continue;
+    for (const p of cell.particles) {
+      const py = p.y + connectOffY;
+      const r = Math.max(2.5, Math.min(7, 1.5 + Math.sqrt(p.count)));
+      if (Math.hypot(mouseX - p.x, mouseY - py) <= r + 3) {
+        hover = p; hoverCell = cell;
+      }
     }
   }
-  connectHover = hover;
+  connectHover = hover ? { particle: hover, cell: hoverCell } : null;
 
-  // draw entities (tables first, users on top)
-  for (const [, ent] of connectEntities) {
-    const isSel = connectSelected && ent.type === connectSelected.type && ent.key === connectSelected.key;
-    const isHov = hover === ent;
-    if (ent.type === 'table') _drawTableBox(ent, isSel, isHov);
-  }
-  for (const [, ent] of connectEntities) {
-    const isSel = connectSelected && ent.type === connectSelected.type && ent.key === connectSelected.key;
-    const isHov = hover === ent;
-    if (ent.type === 'user') _drawUserDot(ent, isSel, isHov);
-  }
+  // draw cells
+  for (const cell of _cells) _drawCell(cell, hover);
 
-  // dynamic island (on top of everything)
-  _drawIsland();
-  if (connectSelected) {
-    const sel = connectSelected;
-    ctx.fillStyle = 'rgba(245,241,232,0.95)';
-    ctx.font = 'bold 11px JetBrains Mono';
-    ctx.textAlign = 'center';
-    const label = (sel.type === 'table' ? 'TABLE  ' : 'USER  ') + sel.key;
-    const lbl = label.length > 30 ? label.slice(0, 29) + '…' : label;
-    ctx.fillText(lbl, vw/2, 70);
-    ctx.fillStyle = 'rgba(232,160,74,0.85)';
-    ctx.font = '9px JetBrains Mono';
-    const related = sel.type === 'table'
-      ? (usersByTable[sel.key] ? usersByTable[sel.key].size : 0) + ' users'
-      : (tablesByUser[sel.key] ? tablesByUser[sel.key].size : 0) + ' tables';
-    ctx.fillText(related + ' · ESC to release', vw/2, 86);
-  }
-
-  // tooltip on hover
+  // tooltip
   const tt = document.getElementById('tooltip');
-  if (hover && !(connectSelected && hover.type === connectSelected.type && hover.key === connectSelected.key)) {
-    document.getElementById('tt-ip').textContent = (hover.type === 'table' ? 'TABLE ' : 'USER ') + hover.key;
-    const meta = hover.type === 'table'
-      ? `${hover.count.toLocaleString()} calls · ${fmtInterval(hover.duration)} · ds: ${hover.ds || '—'}`
-      : `${hover.count.toLocaleString()} calls · ${fmtInterval(hover.duration)}`;
-    document.getElementById('tt-meta').textContent = meta;
+  if (hover) {
+    document.getElementById('tt-ip').textContent =
+      (hover.type === 'table' ? 'TABLE ' : 'USER ') + hover.key;
+    document.getElementById('tt-meta').textContent =
+      `${hover.count.toLocaleString()} calls in ${connectMode === 'tables' ? 'this table' : 'this user'}`;
     tt.style.display = 'block';
     tt.style.left = (mouseX + 14) + 'px';
     tt.style.top = (mouseY + 14) + 'px';
     canvas.style.cursor = 'pointer';
   } else {
     tt.style.display = 'none';
-    canvas.style.cursor = connectSelected ? 'default' : 'crosshair';
+    canvas.style.cursor = connectDragging ? 'grabbing' : 'grab';
   }
 }
+
 
 canvas.addEventListener('wheel', e => {
   if (mainView === 'users') {
@@ -2465,7 +2329,7 @@ canvas.addEventListener('mousedown', e => {
     lineageDragStartX = e.clientX; lineageDragStartY = e.clientY;
     lineageDragOrigX = lineageOffX; lineageDragOrigY = lineageOffY;
     lineageDragMoved = false;
-  } else if (mainView === 'connect' && !connectSelected) {
+  } else if (mainView === 'connect') {
     connectDragging = true;
     connectDragStartY = e.clientY;
     connectDragOrigY = connectOffY;
@@ -2626,10 +2490,6 @@ document.addEventListener('keydown', e => {
       refreshHeader();
       return;
     }
-    if (mainView === 'connect' && connectSelected) {
-      connectSelected = null;
-      return;
-    }
   }
 });
 
@@ -2655,7 +2515,6 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
       resetLineageZoom();
     }
     if (mainView === 'connect') {
-      connectSelected = null;
       connectOffY = 0;
     }
     refreshHeader();
@@ -2678,6 +2537,7 @@ function refreshHeader() {
     document.getElementById('stream-controls').classList.remove('on');
     document.getElementById('users-controls').classList.remove('on');
     document.getElementById('lineage-controls').classList.remove('on');
+    document.getElementById('connect-controls').classList.remove('on');
     document.getElementById('search-box').classList.add('on');
     document.getElementById('hint').textContent = 'CLICK TO INSPECT';
   } else if (mainView === 'tables') {
@@ -2692,6 +2552,7 @@ function refreshHeader() {
     document.getElementById('stream-controls').classList.remove('on');
     document.getElementById('users-controls').classList.remove('on');
     document.getElementById('lineage-controls').classList.remove('on');
+    document.getElementById('connect-controls').classList.remove('on');
     document.getElementById('search-box').classList.add('on');
     document.getElementById('hint').textContent = 'CLICK TO INSPECT';
   } else if (mainView === 'stream') {
@@ -2703,6 +2564,7 @@ function refreshHeader() {
     document.getElementById('stream-controls').classList.add('on');
     document.getElementById('users-controls').classList.remove('on');
     document.getElementById('lineage-controls').classList.remove('on');
+    document.getElementById('connect-controls').classList.remove('on');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = '';
   } else if (mainView === 'users') {
@@ -2714,6 +2576,7 @@ function refreshHeader() {
     document.getElementById('stream-controls').classList.remove('on');
     document.getElementById('users-controls').classList.add('on');
     document.getElementById('lineage-controls').classList.remove('on');
+    document.getElementById('connect-controls').classList.remove('on');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = 'CLICK A RECT TO EXPLORE';
   } else if (mainView === 'lineage') {
@@ -2730,14 +2593,16 @@ function refreshHeader() {
   } else if (mainView === 'connect') {
     document.getElementById('title').textContent = 'Connect';
     document.getElementById('title').classList.remove('ip-mode');
-    document.getElementById('subtitle').textContent = 'TABLES ↔ USERS · CLICK TO PULL RELATED INTO THE ISLAND';
+    document.getElementById('subtitle').textContent = 'TABLES ↔ USERS · CELLS WITH FLOATING PARTICLES';
     document.getElementById('stats').innerHTML = '';
     document.getElementById('bottom-controls').classList.remove('on');
     document.getElementById('stream-controls').classList.remove('on');
     document.getElementById('users-controls').classList.remove('on');
     document.getElementById('lineage-controls').classList.remove('on');
+    document.getElementById('connect-controls').classList.remove('on');
+    document.getElementById('connect-controls').classList.add('on');
     document.getElementById('search-box').classList.remove('on');
-    document.getElementById('hint').textContent = 'CLICK · ESC TO RELEASE';
+    document.getElementById('hint').textContent = 'DRAG TO SCROLL';
   }
   document.getElementById('legend').classList.remove('on');
   document.getElementById('back-btn').classList.remove('on');
@@ -3085,12 +2950,7 @@ canvas.addEventListener('click', e => {
   }
   if (mainView === 'connect') {
     if (connectDragMoved) { connectDragMoved = false; return; }
-    if (connectHover) {
-      connectSelected = { type: connectHover.type, key: connectHover.key };
-    } else if (connectSelected) {
-      connectSelected = null;  // click empty area to deselect
-    }
-    return;
+    return;  // hover-only; no selection in cell layout
   }
   if (mainView === 'lineage') {
     if (lineageMode === 'treemap') {
