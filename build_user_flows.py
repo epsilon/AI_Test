@@ -2075,11 +2075,11 @@ for (const c of CALLS) {
   }
 }
 
-// entity catalogs
-const TOP_TABLES = lineageTableItems.slice(0, 60).map(it => ({
+// entity catalogs (all, not capped)
+const TOP_TABLES = lineageTableItems.slice().map(it => ({
   type: 'table', key: it.key, count: it.count, duration: it.duration, ds: _domDs(it.key),
 }));
-const TOP_USERS = userItemsBase.slice().sort((a,b) => b.count - a.count).slice(0, 60).map(it => ({
+const TOP_USERS = userItemsBase.slice().sort((a,b) => b.count - a.count).map(it => ({
   type: 'user', key: it.key, count: it.count, duration: it.duration,
 }));
 
@@ -2118,7 +2118,7 @@ function _buildCells() {
       }));
     }
     particles.sort((a, b) => b.count - a.count);
-    particles = particles.slice(0, 24);
+    // no cap — show all related entities
 
     // layout home positions inside cell
     const px0 = x + 6, py0 = y + CELL_HEADER + 6;
