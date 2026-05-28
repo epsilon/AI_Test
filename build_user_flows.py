@@ -774,6 +774,59 @@ function _keywordsOf(calls) {
   return { topValues, overlap };
 }
 
+// === Column distribution analysis ===
+// tableSelectColCount[table][col] = count
+const tableSelectColCount = {};
+for (const c of CALLS) {
+  const ts = c.tables || [];
+  const sc = c.select_cols || [];
+  for (const t of ts) {
+    if (!tableSelectColCount[t]) tableSelectColCount[t] = {};
+    for (const col of sc) {
+      tableSelectColCount[t][col] = (tableSelectColCount[t][col] || 0) + 1;
+    }
+  }
+}
+// document frequency (column → number of tables it appears in)
+const colDF = {};
+for (const t of Object.keys(tableSelectColCount)) {
+  for (const col of Object.keys(tableSelectColCount[t])) {
+    colDF[col] = (colDF[col] || 0) + 1;
+  }
+}
+const TOTAL_TABLES_FOR_DF = Object.keys(tableSelectColCount).length || 1;
+const KEY_DF_THRESHOLD = Math.max(4, Math.floor(TOTAL_TABLES_FOR_DF * 0.05));
+
+function _analyzeFromColCounts(cols) {
+  const desired = [];
+  const keys = [];
+  for (const [col, count] of Object.entries(cols)) {
+    const df = colDF[col] || 1;
+    if (df <= 2) {
+      desired.push({ col, count, df });
+    } else if (df >= KEY_DF_THRESHOLD) {
+      keys.push({ col, count, df });
+    }
+  }
+  desired.sort((a, b) => b.count - a.count);
+  keys.sort((a, b) => b.df - a.df || b.count - a.count);
+  return { desired: desired.slice(0, 8), keys: keys.slice(0, 8) };
+}
+
+function _analyzeTableColumns(table) {
+  return _analyzeFromColCounts(tableSelectColCount[table] || {});
+}
+
+function _analyzeUserColumns(calls) {
+  const cols = {};
+  for (const c of calls) {
+    for (const col of (c.select_cols || [])) {
+      cols[col] = (cols[col] || 0) + 1;
+    }
+  }
+  return _analyzeFromColCounts(cols);
+}
+
 // mapped users
 const callsByUser = {};
 for (const c of mappedCalls) {
@@ -787,6 +840,7 @@ const userItemsBase = Object.entries(callsByUser)
     duration: _durationOf(calls),
     functions: _functionsOf(calls),
     keywords: _keywordsOf(calls),
+    colAnalysis: _analyzeUserColumns(calls),
   }));
 
 // mapped calls grouped by table
@@ -803,6 +857,7 @@ const mappedTableItemsBase = Object.entries(callsByMappedTable)
     duration: _durationOf(calls),
     functions: _functionsOf(calls),
     keywords: _keywordsOf(calls),
+    colAnalysis: _analyzeTableColumns(t),
   }));
 
 // unmapped calls grouped by table
@@ -819,6 +874,7 @@ const unmappedTableItemsBase = Object.entries(callsByUnmappedTable)
     duration: _durationOf(calls),
     functions: _functionsOf(calls),
     keywords: _keywordsOf(calls),
+    colAnalysis: _analyzeTableColumns(t),
   }));
 
 // pre-sort by both metrics
@@ -998,25 +1054,81 @@ function renderUsersView() {
         const fnSize = Math.max(8, labelSize * 0.5);
         const lineH = fnSize * 1.35;
         const listTop = nextY + lineH * 0.6;
-        const available = sh - (listTop - sy) - 6;
-        const maxLines = Math.floor(available / lineH);
+        let yy = listTop + fnSize;
         const fnMaxChars = Math.floor((sw - 16) / (fnSize * 0.6));
         ctx.font = `${fnSize}px JetBrains Mono`;
+
+        // FUNCTIONS — uses about 1/4 of remaining height
+        const fnAvail = (sh * 0.28) - (listTop - sy);
+        const fnMaxLines = Math.max(0, Math.floor(fnAvail / lineH));
+        const fnTotal = r.functions.length;
+        const fnReserved = fnTotal > fnMaxLines ? 1 : 0;
+        const fnShown = r.functions.slice(0, Math.max(0, fnMaxLines - fnReserved));
         ctx.fillStyle = 'rgba(10,10,12,0.55)';
-        const total = r.functions.length;
-        const showCount = Math.max(0, Math.min(total, maxLines));
-        const reservedForMore = total > maxLines ? 1 : 0;
-        const shown = r.functions.slice(0, Math.max(0, showCount - reservedForMore));
-        let yy = listTop + fnSize;
-        for (const fn of shown) {
+        for (const fn of fnShown) {
           const s = shortFn(fn);
           const t2 = s.length > fnMaxChars ? s.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : s;
           ctx.fillText(t2, sx + 8, yy);
           yy += lineH;
         }
-        if (reservedForMore) {
+        if (fnReserved && fnShown.length < fnTotal) {
           ctx.fillStyle = 'rgba(10,10,12,0.45)';
-          ctx.fillText('+ ' + (total - shown.length) + ' more', sx + 8, yy);
+          ctx.fillText('+ ' + (fnTotal - fnShown.length) + ' more', sx + 8, yy);
+          yy += lineH;
+        }
+
+        // DESIRED ITEMS
+        if (r.colAnalysis && r.colAnalysis.desired.length && yy < sy + sh - lineH * 2) {
+          yy += lineH * 0.4;
+          ctx.fillStyle = 'rgba(120, 80, 145, 0.95)';
+          ctx.font = `bold ${fnSize}px JetBrains Mono`;
+          ctx.fillText('DESIRED ITEMS', sx + 8, yy);
+          yy += lineH;
+          ctx.font = `${fnSize}px JetBrains Mono`;
+          ctx.fillStyle = 'rgba(60, 30, 70, 0.9)';
+          for (const d of r.colAnalysis.desired) {
+            if (yy >= sy + sh - lineH * 0.5) break;
+            const txt = `${d.col} (${d.count})`;
+            const t2 = txt.length > fnMaxChars ? txt.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : txt;
+            ctx.fillText(t2, sx + 8, yy);
+            yy += lineH;
+          }
+        }
+
+        // FILTERS (where values)
+        if (r.keywords && r.keywords.topValues.length && yy < sy + sh - lineH * 2) {
+          yy += lineH * 0.4;
+          ctx.fillStyle = 'rgba(120, 145, 90, 0.95)';
+          ctx.font = `bold ${fnSize}px JetBrains Mono`;
+          ctx.fillText('FILTERS', sx + 8, yy);
+          yy += lineH;
+          ctx.font = `${fnSize}px JetBrains Mono`;
+          ctx.fillStyle = 'rgba(40, 55, 30, 0.9)';
+          for (const kw of r.keywords.topValues) {
+            if (yy >= sy + sh - lineH * 0.5) break;
+            const txt = `${kw.key} (${kw.count})`;
+            const t2 = txt.length > fnMaxChars ? txt.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : txt;
+            ctx.fillText(t2, sx + 8, yy);
+            yy += lineH;
+          }
+        }
+
+        // EXPECTED UNIQUE KEYS
+        if (r.colAnalysis && r.colAnalysis.keys.length && yy < sy + sh - lineH * 2) {
+          yy += lineH * 0.4;
+          ctx.fillStyle = 'rgba(90, 120, 145, 0.95)';
+          ctx.font = `bold ${fnSize}px JetBrains Mono`;
+          ctx.fillText('EXPECTED UNIQUE KEYS', sx + 8, yy);
+          yy += lineH;
+          ctx.font = `${fnSize}px JetBrains Mono`;
+          ctx.fillStyle = 'rgba(30, 45, 60, 0.9)';
+          for (const k of r.colAnalysis.keys) {
+            if (yy >= sy + sh - lineH * 0.5) break;
+            const txt = `${k.col} · in ${k.df} tables`;
+            const t2 = txt.length > fnMaxChars ? txt.slice(0, Math.max(1, fnMaxChars - 1)) + '…' : txt;
+            ctx.fillText(t2, sx + 8, yy);
+            yy += lineH;
+          }
         }
       }
     }
@@ -1284,8 +1396,8 @@ function _moundsBuildOrUpdate() {
     const it = sorted[i];
     const v = it[lineageMetric] || 0;
     const frac = maxV > 0 ? Math.sqrt(v / maxV) : 0;
-    const height = 30 + frac * maxHeight;
-    const width = 60 + frac * 200;
+    const height = 22 + frac * (maxHeight * 0.55);
+    const width = 110 + frac * 380;
     const moundCx = cx + width / 2;
     let seed = 0;
     for (const ch of it.key) seed = (seed * 31 + ch.charCodeAt(0)) & 0xFFFFFFFF;
@@ -1957,7 +2069,21 @@ canvas.addEventListener('mousemove', e => {
     if (lineageDragMoved) {
       lineageOffX = lineageDragOrigX + dx;
       lineageOffY = lineageDragOrigY + dy;
+      // wind from mouse velocity
+      const now = performance.now();
+      if (_lastDragMouseX != null && _lastDragTime != null) {
+        const mdx = e.clientX - _lastDragMouseX;
+        const dt = Math.max(1, now - _lastDragTime);
+        const velocity = mdx / dt;  // px per ms
+        _moundsWindX += velocity * 2.5;
+        _moundsWindX = Math.max(-6, Math.min(6, _moundsWindX));
+      }
+      _lastDragMouseX = e.clientX;
+      _lastDragTime = now;
     }
+  } else {
+    _lastDragMouseX = null;
+    _lastDragTime = null;
   }
 });
 canvas.addEventListener('mouseup', () => { usersDragging = false; lineageDragging = false; });
