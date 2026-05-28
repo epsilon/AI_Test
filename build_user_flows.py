@@ -291,6 +291,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <button data-view="users">USERS</button>
   <button data-view="lineage">LINEAGE</button>
   <button data-view="connect">CONNECT</button>
+  <button data-view="summary">SUMMARY</button>
 </div>
 
 <div class="hint" id="hint">CLICK TO INSPECT</div>
@@ -2415,6 +2416,173 @@ function renderConnectView() {
   }
 }
 
+// =============================================================
+// SUMMARY view — big numbers + desired items + filter columns + core filters
+// =============================================================
+
+const SUMMARY = (() => {
+  // totals
+  const totalTables = Object.keys(byTable).length;
+  const totalUsers = Object.keys(callsByUser).length;
+  const totalDuration = CALLS.reduce((s, c) => s + (c.duration || 0), 0);
+
+  // global column counts (across all calls)
+  const colTotalCount = {};
+  for (const c of CALLS) {
+    for (const col of (c.select_cols || [])) {
+      colTotalCount[col] = (colTotalCount[col] || 0) + 1;
+    }
+  }
+
+  // desired items: select cols where DF (table count) <= 2
+  const desiredItems = Object.entries(colTotalCount)
+    .filter(([col]) => (colDF[col] || 1) <= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([col, count]) => ({ col, count, df: colDF[col] || 1 }));
+
+  // filter columns: WHERE column usage
+  const whereColCount = {};
+  const whereColFuncs = {};
+  for (const c of CALLS) {
+    if (!c.where_values) continue;
+    for (const col of Object.keys(c.where_values)) {
+      whereColCount[col] = (whereColCount[col] || 0) + 1;
+      if (!whereColFuncs[col]) whereColFuncs[col] = new Set();
+      whereColFuncs[col].add(c.function);
+    }
+  }
+
+  const topFilterCols = Object.entries(whereColCount)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([col, count]) => ({ col, count, funcs: whereColFuncs[col].size }));
+
+  // core filters: WHERE cols used in <=2 distinct functions (specific to certain queries)
+  const coreFilters = Object.entries(whereColCount)
+    .filter(([col]) => whereColFuncs[col].size <= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([col, count]) => ({ col, count, funcs: whereColFuncs[col].size }));
+
+  return { totalTables, totalUsers, totalDuration, desiredItems, topFilterCols, coreFilters };
+})();
+
+function renderSummaryView() {
+  const cx = vw / 2;
+  let y = 90;
+
+  // page title
+  ctx.fillStyle = 'rgba(245,241,232,0.85)';
+  ctx.font = '300 32px Fraunces, serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Summary', cx, y);
+  y += 50;
+
+  // === BIG NUMBERS (3 columns) ===
+  const colW = Math.min(280, vw / 3.2);
+  const xs = [cx - colW, cx, cx + colW];
+  const bigVals = [
+    { v: SUMMARY.totalTables.toLocaleString(), label: 'TABLES' },
+    { v: SUMMARY.totalUsers.toLocaleString(), label: 'USERS' },
+    { v: fmtInterval(SUMMARY.totalDuration), label: 'TOTAL DURATION' },
+  ];
+  for (let i = 0; i < 3; i++) {
+    ctx.fillStyle = 'rgba(232, 160, 74, 0.95)';
+    ctx.font = `300 ${Math.min(72, vw/12)}px Fraunces, serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(bigVals[i].v, xs[i], y + 60);
+    ctx.fillStyle = 'rgba(139, 134, 128, 0.85)';
+    ctx.font = '10px JetBrains Mono';
+    ctx.fillText(bigVals[i].label, xs[i], y + 84);
+  }
+  y += 130;
+
+  // separator
+  ctx.strokeStyle = 'rgba(139, 134, 128, 0.25)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(40, y); ctx.lineTo(vw - 40, y); ctx.stroke();
+  y += 30;
+
+  // === DESIRED ITEMS ===
+  ctx.fillStyle = 'rgba(180, 130, 220, 0.95)';   // purple-ish for desired
+  ctx.font = 'bold 11px JetBrains Mono';
+  ctx.textAlign = 'left';
+  ctx.fillText('TOP DESIRED ITEMS  ·  unique select cols (in ≤2 tables)', 40, y);
+  y += 22;
+
+  const dCount = SUMMARY.desiredItems.length;
+  const dColW = (vw - 80) / Math.max(1, dCount);
+  for (let i = 0; i < dCount; i++) {
+    const it = SUMMARY.desiredItems[i];
+    const x = 40 + i * dColW + dColW/2;
+    ctx.fillStyle = 'rgba(245, 241, 232, 0.95)';
+    ctx.font = `300 ${Math.min(34, vw/24)}px Fraunces, serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(it.col, x, y + 32);
+    ctx.fillStyle = 'rgba(180, 130, 220, 0.85)';
+    ctx.font = '10px JetBrains Mono';
+    ctx.fillText(`${it.count.toLocaleString()} uses  ·  in ${it.df} table${it.df>1?'s':''}`, x, y + 52);
+  }
+  y += 80;
+
+  // separator
+  ctx.strokeStyle = 'rgba(139, 134, 128, 0.25)';
+  ctx.beginPath();
+  ctx.moveTo(40, y); ctx.lineTo(vw - 40, y); ctx.stroke();
+  y += 25;
+
+  // === TOP FILTER COLUMNS (6) ===
+  ctx.fillStyle = 'rgba(130, 200, 150, 0.95)';
+  ctx.font = 'bold 11px JetBrains Mono';
+  ctx.textAlign = 'left';
+  ctx.fillText('TOP FILTER COLUMNS  ·  most-used WHERE columns', 40, y);
+  y += 22;
+
+  const fCount = SUMMARY.topFilterCols.length;
+  const fColW = (vw - 80) / Math.max(1, fCount);
+  for (let i = 0; i < fCount; i++) {
+    const it = SUMMARY.topFilterCols[i];
+    const x = 40 + i * fColW + fColW/2;
+    ctx.fillStyle = 'rgba(245, 241, 232, 0.95)';
+    ctx.font = `300 ${Math.min(22, vw/40)}px Fraunces, serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(it.col, x, y + 22);
+    ctx.fillStyle = 'rgba(130, 200, 150, 0.85)';
+    ctx.font = '9px JetBrains Mono';
+    ctx.fillText(`${it.count.toLocaleString()} calls`, x, y + 38);
+  }
+  y += 60;
+
+  // separator
+  ctx.strokeStyle = 'rgba(139, 134, 128, 0.25)';
+  ctx.beginPath();
+  ctx.moveTo(40, y); ctx.lineTo(vw - 40, y); ctx.stroke();
+  y += 25;
+
+  // === CORE FILTERS (5) — used in only specific queries ===
+  ctx.fillStyle = 'rgba(232, 160, 74, 0.95)';
+  ctx.font = 'bold 11px JetBrains Mono';
+  ctx.textAlign = 'left';
+  ctx.fillText('CORE FILTERS  ·  used in only specific queries (≤2 functions)', 40, y);
+  y += 22;
+
+  const cCount = SUMMARY.coreFilters.length;
+  const cColW = (vw - 80) / Math.max(1, cCount);
+  for (let i = 0; i < cCount; i++) {
+    const it = SUMMARY.coreFilters[i];
+    const x = 40 + i * cColW + cColW/2;
+    ctx.fillStyle = 'rgba(245, 241, 232, 0.95)';
+    ctx.font = `300 ${Math.min(22, vw/40)}px Fraunces, serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(it.col, x, y + 22);
+    ctx.fillStyle = 'rgba(232, 160, 74, 0.85)';
+    ctx.font = '9px JetBrains Mono';
+    ctx.fillText(`${it.count.toLocaleString()} calls · ${it.funcs} func`, x, y + 38);
+  }
+}
+
 
 canvas.addEventListener('wheel', e => {
   if (mainView === 'users') {
@@ -2727,6 +2895,18 @@ function refreshHeader() {
     document.getElementById('connect-controls').classList.add('on');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = 'CLICK A PARTICLE FOR DETAILS · DRAG TO SCROLL';
+  } else if (mainView === 'summary') {
+    document.getElementById('title').textContent = 'Summary';
+    document.getElementById('title').classList.remove('ip-mode');
+    document.getElementById('subtitle').textContent = 'AGGREGATE METRICS';
+    document.getElementById('stats').innerHTML = '';
+    document.getElementById('bottom-controls').classList.remove('on');
+    document.getElementById('stream-controls').classList.remove('on');
+    document.getElementById('users-controls').classList.remove('on');
+    document.getElementById('lineage-controls').classList.remove('on');
+    document.getElementById('connect-controls').classList.remove('on');
+    document.getElementById('search-box').classList.remove('on');
+    document.getElementById('hint').textContent = '';
   }
   document.getElementById('legend').classList.remove('on');
   document.getElementById('back-btn').classList.remove('on');
@@ -3055,6 +3235,7 @@ function loop() {
   else if (mainView === 'users') renderUsersView();
   else if (mainView === 'lineage') renderLineageView();
   else if (mainView === 'connect') renderConnectView();
+  else if (mainView === 'summary') renderSummaryView();
   else if (mainView === 'ips') renderIpParticles();
   else renderTableParticles();
   requestAnimationFrame(loop);
