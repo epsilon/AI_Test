@@ -2088,13 +2088,15 @@ const TOP_USERS = userItemsBase.slice().sort((a,b) => b.count - a.count).slice(0
 // per-entity state {home: {x,y}, phase, target: {x,y}, x, y, visible}
 const connectEntities = new Map();  // `type:key` -> entity state
 
+const MAX_TABLE_COUNT = Math.max(1, ...TOP_TABLES.map(t => t.count));
+const MAX_USER_COUNT = Math.max(1, ...TOP_USERS.map(u => u.count));
+
 function _connectInitPositions() {
   const leftW = vw * 0.45;
   const rightX0 = vw * 0.55;
   const top = 130, bot = vh - 40;
   const usableH = bot - top;
 
-  // tables on the left
   TOP_TABLES.forEach((t, i) => {
     const id = 'table:' + t.key;
     const cols = Math.ceil(Math.sqrt(TOP_TABLES.length * (leftW / usableH)));
@@ -2102,14 +2104,21 @@ function _connectInitPositions() {
     const col = i % cols, row = Math.floor(i / cols);
     const x = (col + 0.5) * (leftW / cols) + 20;
     const y = top + (row + 0.5) * (usableH / rows);
-    const ent = connectEntities.get(id) || { ...t, phase: i * 1.7, x, y };
+    const frac = Math.sqrt(t.count / MAX_TABLE_COUNT);
+    const ent = connectEntities.get(id) || {
+      ...t,
+      phase: i * 1.7,
+      phase2: i * 2.3 + 0.7,
+      x, y,
+    };
     ent.home = { x, y };
     ent.target = { x, y };
+    ent.rx = 38 + frac * 55;
+    ent.ry = 11 + frac * 16;
     ent.visible = true;
     connectEntities.set(id, ent);
   });
 
-  // users on the right
   TOP_USERS.forEach((u, i) => {
     const id = 'user:' + u.key;
     const availW = vw - rightX0 - 20;
@@ -2118,9 +2127,16 @@ function _connectInitPositions() {
     const col = i % cols, row = Math.floor(i / cols);
     const x = rightX0 + (col + 0.5) * (availW / cols);
     const y = top + (row + 0.5) * (usableH / rows);
-    const ent = connectEntities.get(id) || { ...u, phase: i * 1.3, x, y };
+    const frac = Math.sqrt(u.count / MAX_USER_COUNT);
+    const ent = connectEntities.get(id) || {
+      ...u,
+      phase: i * 1.3,
+      phase2: i * 1.9 + 0.4,
+      x, y,
+    };
     ent.home = { x, y };
     ent.target = { x, y };
+    ent.radius = 7 + frac * 20;
     ent.visible = true;
     connectEntities.set(id, ent);
   });
@@ -2180,18 +2196,20 @@ function _connectUpdate(time, dtMs) {
       }
     }
   } else {
-    // floating around home
+    // floating around home — multi-frequency for organic motion
     for (const [, ent] of connectEntities) {
       const t = time / 1000;
-      const dx = Math.sin(t * 0.5 + ent.phase) * 12;
-      const dy = Math.cos(t * 0.4 + ent.phase * 1.3) * 9;
+      const dx = Math.sin(t * 0.45 + ent.phase) * 22
+               + Math.cos(t * 0.78 + ent.phase2) * 14;
+      const dy = Math.cos(t * 0.35 + ent.phase * 0.7) * 18
+               + Math.sin(t * 0.62 + ent.phase2 * 1.1) * 11;
       ent.target = { x: ent.home.x + dx, y: ent.home.y + dy };
       ent.visible = true;
     }
   }
 
   // ease toward target
-  const k = Math.min(1, dtMs / 1000 * 5);
+  const k = Math.min(1, dtMs / 1000 * 3.5);
   for (const [, ent] of connectEntities) {
     ent.x += (ent.target.x - ent.x) * k;
     ent.y += (ent.target.y - ent.y) * k;
@@ -2202,36 +2220,46 @@ function _connectUpdate(time, dtMs) {
 }
 
 function _drawTableBox(ent, isSelected, isHover) {
-  const w = 110, h = 26;
-  const x = ent.x - w/2, y = ent.y - h/2;
+  const rx = ent.rx || 55;
+  const ry = ent.ry || 16;
   const hue = ent.ds ? (DS_HUE[ent.ds] || 0) : 220;
   const sat = ent.ds ? 55 : 20;
 
+  ctx.beginPath();
+  ctx.ellipse(ent.x, ent.y, rx, ry, 0, 0, Math.PI * 2);
+
   if (isSelected) {
     ctx.fillStyle = `hsla(${hue}, ${sat+10}%, 60%, ${ent.alpha})`;
+    ctx.fill();
     ctx.strokeStyle = 'rgba(245,241,232,0.95)';
     ctx.lineWidth = 2;
+    ctx.stroke();
   } else if (isHover) {
-    ctx.fillStyle = `hsla(${hue}, ${sat}%, 50%, ${ent.alpha})`;
+    ctx.fillStyle = `hsla(${hue}, ${sat}%, 52%, ${ent.alpha})`;
+    ctx.fill();
     ctx.strokeStyle = 'rgba(245,241,232,0.7)';
     ctx.lineWidth = 1.5;
+    ctx.stroke();
   } else {
-    ctx.fillStyle = `hsla(${hue}, ${sat}%, 40%, ${ent.alpha * 0.85})`;
-    ctx.strokeStyle = `hsla(${hue}, ${sat}%, 55%, ${ent.alpha * 0.7})`;
+    ctx.fillStyle = `hsla(${hue}, ${sat}%, 42%, ${ent.alpha * 0.85})`;
+    ctx.fill();
+    ctx.strokeStyle = `hsla(${hue}, ${sat}%, 60%, ${ent.alpha * 0.7})`;
     ctx.lineWidth = 1;
+    ctx.stroke();
   }
-  ctx.fillRect(x, y, w, h);
-  ctx.strokeRect(x, y, w, h);
 
   ctx.fillStyle = `rgba(245,241,232,${ent.alpha * 0.95})`;
-  ctx.font = '10px JetBrains Mono';
+  const fontSize = Math.max(8, Math.min(12, ry * 0.7));
+  ctx.font = `${fontSize}px JetBrains Mono`;
   ctx.textAlign = 'center';
-  const txt = ent.key.length > 16 ? ent.key.slice(0, 15) + '…' : ent.key;
-  ctx.fillText(txt, ent.x, ent.y + 4);
+  const maxChars = Math.floor((rx * 2 - 10) / (fontSize * 0.6));
+  const txt = ent.key.length > maxChars ? ent.key.slice(0, Math.max(1, maxChars - 1)) + '…' : ent.key;
+  ctx.fillText(txt, ent.x, ent.y + fontSize / 3);
 }
 
 function _drawUserDot(ent, isSelected, isHover) {
-  const r = isSelected ? 18 : (isHover ? 12 : 9);
+  const baseR = ent.radius || 9;
+  const r = isSelected ? baseR * 1.6 : (isHover ? baseR * 1.25 : baseR);
   ctx.fillStyle = isSelected
     ? `rgba(232, 160, 74, ${ent.alpha})`
     : isHover
@@ -2325,11 +2353,13 @@ function renderConnectView() {
   for (const [, ent] of connectEntities) {
     if (ent.alpha < 0.3) continue;
     if (ent.type === 'table') {
-      const w = 110, h = 26;
-      if (mouseX >= ent.x - w/2 && mouseX <= ent.x + w/2
-       && mouseY >= ent.y - h/2 && mouseY <= ent.y + h/2) hover = ent;
+      const rx = ent.rx || 55;
+      const ry = ent.ry || 16;
+      const dx = (mouseX - ent.x) / rx;
+      const dy = (mouseY - ent.y) / ry;
+      if (dx * dx + dy * dy <= 1) hover = ent;
     } else {
-      const r = 12;
+      const r = (ent.radius || 9) * 1.4;
       if (Math.hypot(mouseX - ent.x, mouseY - ent.y) < r) hover = ent;
     }
   }
@@ -2587,6 +2617,9 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
       lineageSelected = null;
       resetLineageZoom();
     }
+    if (mainView === 'connect') {
+      connectSelected = null;
+    }
     refreshHeader();
     closePanel();
     searchInput.value = ''; filterQuery = ''; recomputeVisibleTables();
@@ -2656,6 +2689,17 @@ function refreshHeader() {
     document.getElementById('lineage-controls').classList.toggle('on', lineageMode === 'treemap');
     document.getElementById('search-box').classList.remove('on');
     document.getElementById('hint').textContent = 'CLICK A TABLE · ESC TO GO BACK';
+  } else if (mainView === 'connect') {
+    document.getElementById('title').textContent = 'Connect';
+    document.getElementById('title').classList.remove('ip-mode');
+    document.getElementById('subtitle').textContent = 'TABLES ↔ USERS · CLICK TO PULL RELATED INTO THE ISLAND';
+    document.getElementById('stats').innerHTML = '';
+    document.getElementById('bottom-controls').classList.remove('on');
+    document.getElementById('stream-controls').classList.remove('on');
+    document.getElementById('users-controls').classList.remove('on');
+    document.getElementById('lineage-controls').classList.remove('on');
+    document.getElementById('search-box').classList.remove('on');
+    document.getElementById('hint').textContent = 'CLICK · ESC TO RELEASE';
   }
   document.getElementById('legend').classList.remove('on');
   document.getElementById('back-btn').classList.remove('on');
