@@ -1245,6 +1245,8 @@ window.addEventListener('load', () => {
       document.querySelectorAll('#connect-controls button[data-cmode]').forEach(b =>
         b.classList.toggle('active', b === btn));
       connectOffY = 0;
+      activeDesiredUser = null;
+      hoveredDesiredCol = null;
       _buildCells();
     });
   });
@@ -2089,6 +2091,10 @@ let connectDragging = false;
 let connectDragStartY = 0, connectDragOrigY = 0, connectDragMoved = false;
 let connectHover = null;       // {kind: 'cell'|'particle', cellKey, particleKey?}
 let _connectLastTime = performance.now();
+let activeDesiredUser = null;  // user key whose desired-cols bar is shown (USER CELLS only)
+let hoveredDesiredCol = null;  // col name being hovered in the bar
+let _desiredChipHits = [];     // rects for chip hit-test
+let _desiredBtnHits = [];      // rects for per-cell 'D' button hit-test
 
 // Cell + particle state (rebuilt on mode change / resize)
 const CELL_W = 200, CELL_H = 150, CELL_HEADER = 32, CELL_GAP = 8;
@@ -2158,9 +2164,8 @@ function _updateParticles(time) {
   }
 }
 
-function _drawCell(cell, hoverParticle) {
+function _drawCell(cell, hoverParticle, now) {
   const cy = cell.y + connectOffY;
-  // skip if off-screen
   if (cy + cell.h < 100 || cy > vh) return;
 
   const hue = connectMode === 'tables'
@@ -2175,8 +2180,12 @@ function _drawCell(cell, hoverParticle) {
   ctx.strokeRect(cell.x, cy, cell.w, cell.h);
 
   // header bg
-  ctx.fillStyle = `hsla(${hue}, 50%, 32%, 0.7)`;
+  const isActiveDesired = (connectMode === 'users' && activeDesiredUser === cell.key);
+  ctx.fillStyle = isActiveDesired
+    ? `hsla(${hue}, 60%, 40%, 0.85)`
+    : `hsla(${hue}, 50%, 32%, 0.7)`;
   ctx.fillRect(cell.x, cy, cell.w, CELL_HEADER);
+  ctx.strokeStyle = isActiveDesired ? 'rgba(232,160,74,0.9)' : 'rgba(139, 134, 128, 0.4)';
   ctx.strokeRect(cell.x, cy, cell.w, CELL_HEADER);
 
   // header text
@@ -2185,7 +2194,8 @@ function _drawCell(cell, hoverParticle) {
   ctx.textAlign = 'left';
   const prefix = connectMode === 'tables' ? '' : 'USER ';
   const txt = prefix + cell.key;
-  const maxChars = Math.floor((cell.w - 70) / 7);
+  const reserveRight = connectMode === 'users' ? 38 : 70;
+  const maxChars = Math.floor((cell.w - reserveRight) / 7);
   const shown = txt.length > maxChars ? txt.slice(0, maxChars - 1) + '…' : txt;
   ctx.fillText(shown, cell.x + 8, cy + 14);
 
@@ -2197,31 +2207,73 @@ function _drawCell(cell, hoverParticle) {
     cell.x + 8, cy + 26
   );
 
-  // datasource tag (right side, tables mode)
+  // datasource tag (tables mode) OR Desired button (users mode)
   if (connectMode === 'tables' && cell.ds) {
     ctx.fillStyle = `hsla(${hue}, 55%, 70%, 0.95)`;
     ctx.font = '8px JetBrains Mono';
     ctx.textAlign = 'right';
     ctx.fillText(cell.ds, cell.x + cell.w - 8, cy + 14);
+  } else if (connectMode === 'users') {
+    // Desired-columns button
+    const bx = cell.x + cell.w - 26;
+    const by = cy + 6;
+    const bw = 20, bh = 20;
+    const isActive = activeDesiredUser === cell.key;
+    ctx.fillStyle = isActive ? 'rgba(232, 160, 74, 1)' : 'rgba(180, 170, 150, 0.35)';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, 4);
+    else ctx.rect(bx, by, bw, bh);
+    ctx.fill();
+    ctx.fillStyle = isActive ? 'rgba(20,18,16,1)' : 'rgba(245,241,232,0.95)';
+    ctx.font = 'bold 10px JetBrains Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText('D', bx + bw/2, by + 14);
+    _desiredBtnHits.push({ key: cell.key, x: bx, y: by, w: bw, h: bh });
   }
 
   // particles
   for (const p of cell.particles) {
     const py = p.y + connectOffY;
-    const r = Math.max(2.5, Math.min(7, 1.5 + Math.sqrt(p.count)));
+    let r = Math.max(2.5, Math.min(7, 1.5 + Math.sqrt(p.count)));
     const isHover = hoverParticle === p;
+
+    // glow if this table contains the hovered desired column
+    let isGlow = false;
+    if (hoveredDesiredCol && p.type === 'table'
+        && tableSelectColCount[p.key]
+        && tableSelectColCount[p.key][hoveredDesiredCol]) {
+      isGlow = true;
+    }
+
+    if (isGlow) {
+      const pulse = 0.55 + Math.sin(now * 0.008) * 0.45;
+      ctx.shadowColor = 'rgba(232, 200, 130, 1)';
+      ctx.shadowBlur = 14 * pulse;
+      r = r + 2.5;
+    }
+
     let color;
     if (connectMode === 'tables') {
       color = isHover ? 'rgba(245, 220, 180, 1)' : 'rgba(220, 180, 140, 0.85)';
     } else {
       const phue = p.ds ? (DS_HUE[p.ds] || 220) : 220;
-      color = isHover ? `hsla(${phue}, 70%, 70%, 1)` : `hsla(${phue}, 55%, 55%, 0.85)`;
+      if (isGlow) {
+        color = `hsla(${phue}, 80%, 75%, 1)`;
+      } else {
+        color = isHover ? `hsla(${phue}, 70%, 70%, 1)` : `hsla(${phue}, 55%, 55%, 0.85)`;
+      }
     }
     ctx.fillStyle = color;
     ctx.beginPath();
     ctx.arc(p.x, py, isHover ? r + 1.5 : r, 0, Math.PI * 2);
     ctx.fill();
-    if (isHover) {
+
+    if (isGlow) {
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(232,200,130,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    } else if (isHover) {
       ctx.strokeStyle = 'rgba(245,241,232,0.8)';
       ctx.lineWidth = 1;
       ctx.stroke();
@@ -2229,10 +2281,65 @@ function _drawCell(cell, hoverParticle) {
   }
 }
 
+function _drawDesiredBar(now) {
+  _desiredChipHits = [];
+  if (!activeDesiredUser) return;
+  const ui = userItemsBase.find(u => u.key === activeDesiredUser);
+  if (!ui || !ui.colAnalysis || !ui.colAnalysis.desired.length) return;
+
+  const cols = ui.colAnalysis.desired;
+  const barH = 40;
+  const barY = vh - 40 - barH;
+
+  // background
+  ctx.fillStyle = 'rgba(15, 13, 11, 0.97)';
+  ctx.fillRect(0, barY, vw, barH);
+  ctx.strokeStyle = 'rgba(232, 160, 74, 0.6)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, barY); ctx.lineTo(vw, barY); ctx.stroke();
+
+  // label
+  ctx.fillStyle = 'rgba(232, 160, 74, 0.95)';
+  ctx.font = 'bold 10px JetBrains Mono';
+  ctx.textAlign = 'left';
+  ctx.fillText(`DESIRED COLS · ${activeDesiredUser}`, 16, barY + 24);
+
+  // close hint at right
+  ctx.fillStyle = 'rgba(180,170,150,0.7)';
+  ctx.font = '9px JetBrains Mono';
+  ctx.textAlign = 'right';
+  ctx.fillText('click D again to close · hover a chip to glow tables', vw - 16, barY + 24);
+
+  // chips
+  ctx.textAlign = 'left';
+  let x = 16 + ctx.measureText(`DESIRED COLS · ${activeDesiredUser}`).width + 24;
+  for (const d of cols) {
+    const txt = `${d.col} ×${d.count}`;
+    ctx.font = '10px JetBrains Mono';
+    const w = ctx.measureText(txt).width + 14;
+    const isHover = hoveredDesiredCol === d.col;
+    ctx.fillStyle = isHover ? 'rgba(232,160,74,0.95)' : 'rgba(180,170,150,0.22)';
+    ctx.strokeStyle = isHover ? 'rgba(245,220,180,0.95)' : 'rgba(180,170,150,0.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, barY + 10, w, 22, 11);
+    else ctx.rect(x, barY + 10, w, 22);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = isHover ? 'rgba(20,18,16,1)' : 'rgba(245,241,232,0.92)';
+    ctx.fillText(txt, x + 7, barY + 25);
+    _desiredChipHits.push({ col: d.col, x, y: barY + 10, w, h: 22 });
+    x += w + 6;
+    if (x > vw - 200) break;  // wrap protection
+  }
+}
+
 function renderConnectView() {
   const now = performance.now();
   _connectLastTime = now;
   _updateParticles(now);
+  _desiredBtnHits = [];
 
   // header
   ctx.fillStyle = 'rgba(245,241,232,0.85)';
@@ -2243,7 +2350,7 @@ function renderConnectView() {
   ctx.font = '10px JetBrains Mono';
   const sub = connectMode === 'tables'
     ? 'each cell = one TABLE · particles inside = users who touched it · drag to scroll'
-    : 'each cell = one USER · particles inside = tables they used · drag to scroll';
+    : 'each cell = one USER · particles inside = tables they used · "D" button = desired cols';
   ctx.fillText(sub, vw/2, 58);
 
   // datasource legend
@@ -2258,8 +2365,8 @@ function renderConnectView() {
     lx += 80;
   }
 
-  // hover detection
-  let hover = null, hoverCell = null;
+  // hover detection — particles
+  let hover = null;
   for (const cell of _cells) {
     const cy = cell.y + connectOffY;
     if (cy + cell.h < 100 || cy > vh) continue;
@@ -2267,14 +2374,29 @@ function renderConnectView() {
       const py = p.y + connectOffY;
       const r = Math.max(2.5, Math.min(7, 1.5 + Math.sqrt(p.count)));
       if (Math.hypot(mouseX - p.x, mouseY - py) <= r + 3) {
-        hover = p; hoverCell = cell;
+        hover = p;
       }
     }
   }
-  connectHover = hover ? { particle: hover, cell: hoverCell } : null;
+  connectHover = hover ? { particle: hover } : null;
 
-  // draw cells
-  for (const cell of _cells) _drawCell(cell, hover);
+  // draw cells (registers _desiredBtnHits + reads hoveredDesiredCol for glow)
+  for (const cell of _cells) _drawCell(cell, hover, now);
+
+  // desired bar (top-level, registers _desiredChipHits)
+  _drawDesiredBar(now);
+
+  // chip hover detection
+  hoveredDesiredCol = null;
+  if (activeDesiredUser) {
+    for (const h of _desiredChipHits) {
+      if (mouseX >= h.x && mouseX <= h.x + h.w
+       && mouseY >= h.y && mouseY <= h.y + h.h) {
+        hoveredDesiredCol = h.col;
+        break;
+      }
+    }
+  }
 
   // tooltip
   const tt = document.getElementById('tooltip');
@@ -2516,6 +2638,8 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
     }
     if (mainView === 'connect') {
       connectOffY = 0;
+      activeDesiredUser = null;
+      hoveredDesiredCol = null;
     }
     refreshHeader();
     closePanel();
@@ -2602,7 +2726,7 @@ function refreshHeader() {
     document.getElementById('connect-controls').classList.remove('on');
     document.getElementById('connect-controls').classList.add('on');
     document.getElementById('search-box').classList.remove('on');
-    document.getElementById('hint').textContent = 'DRAG TO SCROLL';
+    document.getElementById('hint').textContent = 'CLICK A PARTICLE FOR DETAILS · DRAG TO SCROLL';
   }
   document.getElementById('legend').classList.remove('on');
   document.getElementById('back-btn').classList.remove('on');
@@ -2950,7 +3074,27 @@ canvas.addEventListener('click', e => {
   }
   if (mainView === 'connect') {
     if (connectDragMoved) { connectDragMoved = false; return; }
-    return;  // hover-only; no selection in cell layout
+    // D-button hit-test (priority over particle)
+    for (const h of _desiredBtnHits) {
+      if (mouseX >= h.x && mouseX <= h.x + h.w
+       && mouseY >= h.y && mouseY <= h.y + h.h) {
+        activeDesiredUser = (activeDesiredUser === h.key) ? null : h.key;
+        hoveredDesiredCol = null;
+        return;
+      }
+    }
+    // particle click
+    if (connectHover && connectHover.particle) {
+      const p = connectHover.particle;
+      if (p.type === 'user') {
+        const ui = userItemsBase.find(u => u.key === p.key);
+        if (ui) openUserDetailPanel(ui);
+      } else {
+        const ti = tableList.find(t => t.table === p.key);
+        if (ti) openTablePanel({ ...ti, hue: hashHue(ti.table) });
+      }
+    }
+    return;
   }
   if (mainView === 'lineage') {
     if (lineageMode === 'treemap') {
