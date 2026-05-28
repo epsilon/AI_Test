@@ -2092,18 +2092,19 @@ const MAX_TABLE_COUNT = Math.max(1, ...TOP_TABLES.map(t => t.count));
 const MAX_USER_COUNT = Math.max(1, ...TOP_USERS.map(u => u.count));
 
 function _connectInitPositions() {
-  const leftW = vw * 0.45;
-  const rightX0 = vw * 0.55;
-  const top = 130, bot = vh - 40;
-  const usableH = bot - top;
+  const cellW = 110, cellH = 90, gap = 6;
+  const halfW = vw / 2;
+  const top = 130;
 
+  // 좌측: 테이블 그리드
+  const leftAvail = halfW - 30;
+  const leftCols = Math.max(1, Math.floor((leftAvail + gap) / (cellW + gap)));
   TOP_TABLES.forEach((t, i) => {
     const id = 'table:' + t.key;
-    const cols = Math.ceil(Math.sqrt(TOP_TABLES.length * (leftW / usableH)));
-    const rows = Math.ceil(TOP_TABLES.length / cols);
-    const col = i % cols, row = Math.floor(i / cols);
-    const x = (col + 0.5) * (leftW / cols) + 20;
-    const y = top + (row + 0.5) * (usableH / rows);
+    const col = i % leftCols;
+    const row = Math.floor(i / leftCols);
+    const x = 15 + col * (cellW + gap) + cellW / 2;
+    const y = top + row * (cellH + gap) + cellH / 2;
     const frac = Math.sqrt(t.count / MAX_TABLE_COUNT);
     const ent = connectEntities.get(id) || {
       ...t,
@@ -2112,21 +2113,25 @@ function _connectInitPositions() {
       x, y,
     };
     ent.home = { x, y };
+    ent.cellW = cellW;
+    ent.cellH = cellH;
     ent.target = { x, y };
-    ent.rx = 38 + frac * 55;
-    ent.ry = 11 + frac * 16;
+    ent.rx = 28 + frac * 25;
+    ent.ry = 9 + frac * 10;
     ent.visible = true;
     connectEntities.set(id, ent);
   });
 
+  // 우측: 사용자 그리드
+  const rightAvail = halfW - 30;
+  const rightCols = Math.max(1, Math.floor((rightAvail + gap) / (cellW + gap)));
+  const rightX0 = halfW + 15;
   TOP_USERS.forEach((u, i) => {
     const id = 'user:' + u.key;
-    const availW = vw - rightX0 - 20;
-    const cols = Math.ceil(Math.sqrt(TOP_USERS.length * (availW / usableH)));
-    const rows = Math.ceil(TOP_USERS.length / cols);
-    const col = i % cols, row = Math.floor(i / cols);
-    const x = rightX0 + (col + 0.5) * (availW / cols);
-    const y = top + (row + 0.5) * (usableH / rows);
+    const col = i % rightCols;
+    const row = Math.floor(i / rightCols);
+    const x = rightX0 + col * (cellW + gap) + cellW / 2;
+    const y = top + row * (cellH + gap) + cellH / 2;
     const frac = Math.sqrt(u.count / MAX_USER_COUNT);
     const ent = connectEntities.get(id) || {
       ...u,
@@ -2135,8 +2140,10 @@ function _connectInitPositions() {
       x, y,
     };
     ent.home = { x, y };
+    ent.cellW = cellW;
+    ent.cellH = cellH;
     ent.target = { x, y };
-    ent.radius = 7 + frac * 20;
+    ent.radius = 10 + frac * 18;
     ent.visible = true;
     connectEntities.set(id, ent);
   });
@@ -2147,6 +2154,9 @@ window.addEventListener('resize', _connectInitPositions);
 let connectSelected = null;  // {type, key} or null
 let connectHover = null;
 let _connectLastTime = performance.now();
+let connectOffY = 0;
+let connectDragging = false;
+let connectDragStartY = 0, connectDragOrigY = 0, connectDragMoved = false;
 
 function _connectUpdate(time, dtMs) {
   // compute targets based on selection
@@ -2196,13 +2206,15 @@ function _connectUpdate(time, dtMs) {
       }
     }
   } else {
-    // floating around home — multi-frequency for organic motion
+    // floating inside cell — bounded by cell size
     for (const [, ent] of connectEntities) {
       const t = time / 1000;
-      const dx = Math.sin(t * 0.45 + ent.phase) * 22
-               + Math.cos(t * 0.78 + ent.phase2) * 14;
-      const dy = Math.cos(t * 0.35 + ent.phase * 0.7) * 18
-               + Math.sin(t * 0.62 + ent.phase2 * 1.1) * 11;
+      const ampX = (ent.cellW || 100) * 0.18;
+      const ampY = (ent.cellH || 80) * 0.16;
+      const dx = Math.sin(t * 0.7 + ent.phase) * ampX
+               + Math.cos(t * 1.15 + ent.phase2) * ampX * 0.4;
+      const dy = Math.cos(t * 0.6 + ent.phase * 0.7) * ampY
+               + Math.sin(t * 0.95 + ent.phase2 * 1.1) * ampY * 0.4;
       ent.target = { x: ent.home.x + dx, y: ent.home.y + dy };
       ent.visible = true;
     }
@@ -2222,11 +2234,12 @@ function _connectUpdate(time, dtMs) {
 function _drawTableBox(ent, isSelected, isHover) {
   const rx = ent.rx || 55;
   const ry = ent.ry || 16;
+  const cy = ent.y + (isSelected ? 0 : connectOffY);
   const hue = ent.ds ? (DS_HUE[ent.ds] || 0) : 220;
   const sat = ent.ds ? 55 : 20;
 
   ctx.beginPath();
-  ctx.ellipse(ent.x, ent.y, rx, ry, 0, 0, Math.PI * 2);
+  ctx.ellipse(ent.x, cy, rx, ry, 0, 0, Math.PI * 2);
 
   if (isSelected) {
     ctx.fillStyle = `hsla(${hue}, ${sat+10}%, 60%, ${ent.alpha})`;
@@ -2254,19 +2267,20 @@ function _drawTableBox(ent, isSelected, isHover) {
   ctx.textAlign = 'center';
   const maxChars = Math.floor((rx * 2 - 10) / (fontSize * 0.6));
   const txt = ent.key.length > maxChars ? ent.key.slice(0, Math.max(1, maxChars - 1)) + '…' : ent.key;
-  ctx.fillText(txt, ent.x, ent.y + fontSize / 3);
+  ctx.fillText(txt, ent.x, cy + fontSize / 3);
 }
 
 function _drawUserDot(ent, isSelected, isHover) {
   const baseR = ent.radius || 9;
   const r = isSelected ? baseR * 1.6 : (isHover ? baseR * 1.25 : baseR);
+  const cy = ent.y + (isSelected ? 0 : connectOffY);
   ctx.fillStyle = isSelected
     ? `rgba(232, 160, 74, ${ent.alpha})`
     : isHover
       ? `rgba(232, 200, 130, ${ent.alpha})`
       : `rgba(180, 160, 130, ${ent.alpha * 0.85})`;
   ctx.beginPath();
-  ctx.arc(ent.x, ent.y, r, 0, Math.PI * 2);
+  ctx.arc(ent.x, cy, r, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = `rgba(245,241,232,${ent.alpha * 0.4})`;
   ctx.lineWidth = 1;
@@ -2276,12 +2290,13 @@ function _drawUserDot(ent, isSelected, isHover) {
     ctx.fillStyle = `rgba(245,241,232,${ent.alpha})`;
     ctx.font = '9px JetBrains Mono';
     ctx.textAlign = 'center';
-    ctx.fillText(ent.key, ent.x, ent.y + r + 12);
+    ctx.fillText(ent.key, ent.x, cy + r + 12);
   }
 }
 
 function _drawConnectionLine(ent, islandCx, islandCy) {
-  const fromX = ent.x, fromY = ent.y;
+  const fromX = ent.x;
+  const fromY = ent.y + connectOffY;
   const toX = islandCx, toY = islandCy + 18;
   ctx.strokeStyle = `rgba(232,160,74,${0.35 * ent.alpha})`;
   ctx.lineWidth = 1;
@@ -2352,15 +2367,17 @@ function renderConnectView() {
   let hover = null;
   for (const [, ent] of connectEntities) {
     if (ent.alpha < 0.3) continue;
+    const isSel = connectSelected && ent.type === connectSelected.type && ent.key === connectSelected.key;
+    const ey = ent.y + (isSel ? 0 : connectOffY);
     if (ent.type === 'table') {
       const rx = ent.rx || 55;
       const ry = ent.ry || 16;
       const dx = (mouseX - ent.x) / rx;
-      const dy = (mouseY - ent.y) / ry;
+      const dy = (mouseY - ey) / ry;
       if (dx * dx + dy * dy <= 1) hover = ent;
     } else {
       const r = (ent.radius || 9) * 1.4;
-      if (Math.hypot(mouseX - ent.x, mouseY - ent.y) < r) hover = ent;
+      if (Math.hypot(mouseX - ent.x, mouseY - ey) < r) hover = ent;
     }
   }
   connectHover = hover;
@@ -2448,6 +2465,11 @@ canvas.addEventListener('mousedown', e => {
     lineageDragStartX = e.clientX; lineageDragStartY = e.clientY;
     lineageDragOrigX = lineageOffX; lineageDragOrigY = lineageOffY;
     lineageDragMoved = false;
+  } else if (mainView === 'connect' && !connectSelected) {
+    connectDragging = true;
+    connectDragStartY = e.clientY;
+    connectDragOrigY = connectOffY;
+    connectDragMoved = false;
   }
 });
 canvas.addEventListener('mousemove', e => {
@@ -2472,7 +2494,7 @@ canvas.addEventListener('mousemove', e => {
       if (_lastDragMouseX != null && _lastDragTime != null) {
         const mdx = e.clientX - _lastDragMouseX;
         const dt = Math.max(1, now - _lastDragTime);
-        const velocity = mdx / dt;  // px per ms
+        const velocity = mdx / dt;
         _moundsWindX += velocity * 2.5;
         _moundsWindX = Math.max(-6, Math.min(6, _moundsWindX));
       }
@@ -2483,9 +2505,24 @@ canvas.addEventListener('mousemove', e => {
     _lastDragMouseX = null;
     _lastDragTime = null;
   }
+  if (connectDragging) {
+    const dy = e.clientY - connectDragStartY;
+    if (!connectDragMoved && Math.abs(dy) > 4) connectDragMoved = true;
+    if (connectDragMoved) {
+      connectOffY = connectDragOrigY + dy;
+    }
+  }
 });
-canvas.addEventListener('mouseup', () => { usersDragging = false; lineageDragging = false; });
-canvas.addEventListener('mouseleave', () => { usersDragging = false; lineageDragging = false; });
+canvas.addEventListener('mouseup', () => {
+  usersDragging = false;
+  lineageDragging = false;
+  connectDragging = false;
+});
+canvas.addEventListener('mouseleave', () => {
+  usersDragging = false;
+  lineageDragging = false;
+  connectDragging = false;
+});
 
 // --- EDGES ---
 // JOIN edges: tables that appear in the same call (same SQL flow)
@@ -2619,6 +2656,7 @@ document.querySelectorAll('.view-toggle button').forEach(btn => {
     }
     if (mainView === 'connect') {
       connectSelected = null;
+      connectOffY = 0;
     }
     refreshHeader();
     closePanel();
@@ -3046,8 +3084,11 @@ canvas.addEventListener('click', e => {
     return;
   }
   if (mainView === 'connect') {
+    if (connectDragMoved) { connectDragMoved = false; return; }
     if (connectHover) {
       connectSelected = { type: connectHover.type, key: connectHover.key };
+    } else if (connectSelected) {
+      connectSelected = null;  // click empty area to deselect
     }
     return;
   }
