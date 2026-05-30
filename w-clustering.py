@@ -265,38 +265,7 @@ print(f"tiles after filter: {len(F)}  (feature dim {F.shape[1] if len(F) else 0}
 assert len(F) >= 10, "tile 이 너무 적음 — MIN_COVERAGE/MIN_TOTAL 낮춰보세요"
 
 
-# ---------- embed + cluster ----------
-Xs = StandardScaler().fit_transform(F)
-
-if HAS_UMAP:
-    emb = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2,
-                    random_state=RANDOM_STATE).fit_transform(Xs)
-    embed_method = "UMAP"
-else:
-    emb = PCA(n_components=2, random_state=RANDOM_STATE).fit_transform(Xs)
-    embed_method = "PCA"
-
-if HAS_HDBSCAN:
-    mcs = max(10, len(F)//40)
-    labels = hdbscan.HDBSCAN(min_cluster_size=mcs).fit_predict(emb)
-    cluster_method = f"HDBSCAN(min_cluster_size={mcs})"
-else:
-    from sklearn.cluster import KMeans
-    from sklearn.metrics import silhouette_score
-    best = (-1, None, None)
-    for k in range(3, 11):
-        km = KMeans(n_clusters=k, n_init=10, random_state=RANDOM_STATE).fit(emb)
-        s = silhouette_score(emb, km.labels_)
-        if s > best[0]: best = (s, k, km.labels_)
-    labels = best[2]
-    cluster_method = f"KMeans(k={best[1]}, silhouette={best[0]:.2f})"
-
-print(f"embed: {embed_method}   cluster: {cluster_method}")
-uniq = sorted(set(labels))
-print(f"clusters: {[int(c) for c in uniq]}  (-1 = noise)")
-
-
-# ---------- heuristic labels + centroid maps ----------
+# ---------- helpers: labels + centroid render ----------
 def label_cluster(radial_mean, aniso_mean, moran_mean, cen_mean):
     # anisotropy(선형성)가 가장 특이적인 신호 → 먼저. scratch 는 중심을 지나도 scratch.
     if aniso_mean > 0.55:
@@ -327,30 +296,126 @@ def render_map(values, title, vmaxp=None):
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode()
 
+# ---------- global scaling + precomputed arrays ----------
+try: MCS_DIVISOR
+except NameError: MCS_DIVISOR = 80          # min_cluster_size = n // MCS_DIVISOR
+
+try: MIN_TILES_PER_VIEW
+except NameError: MIN_TILES_PER_VIEW = 30   # 이보다 tile 적은 LOT 은 per-lot 뷰 생략
+
+try: MAX_LOT_VIEWS
+except NameError: MAX_LOT_VIEWS = 12        # per-lot 뷰 최대 개수 (tile 많은 순)
+
+Xs = StandardScaler().fit_transform(F)
 aligned_maps = np.array(aligned_maps)
 radial_all = np.array([r["radial"] for r in records])
-aniso_all = np.array([r["aniso"] for r in records])
-moran_all = np.array([r["moran"] for r in records])
-cen_all = np.array([r["cen_off"] for r in records])
+aniso_all  = np.array([r["aniso"] for r in records])
+moran_all  = np.array([r["moran"] for r in records])
+cen_all    = np.array([r["cen_off"] for r in records])
 
-clusters = []
-for c in uniq:
-    idx = np.where(labels == c)[0]
-    centroid = aligned_maps[idx].mean(axis=0)
-    rad_m = radial_all[idx].mean(axis=0)
-    lab = "noise" if c == -1 else label_cluster(
-        rad_m, aniso_all[idx].mean(), moran_all[idx].mean(), cen_all[idx].mean())
-    clusters.append(dict(
-        cid=int(c), label=lab, n=len(idx),
-        aniso=round(float(aniso_all[idx].mean()),3),
-        moran=round(float(moran_all[idx].mean()),3),
-        centroid_png=render_map(centroid, f"cluster {c} · {lab} · n={len(idx)}"),
-    ))
+palette = ["#E24B4A","#378ADD","#1D9E75","#EF9F27","#7F77DD","#D8568A",
+           "#41B0C4","#9E6B1D","#6FB03A","#C44141","#5A6ACF","#B0843A"]
 
-# assign label back to records
-cid2lab = {cc["cid"]: cc["label"] for cc in clusters}
+def run_view(name, idx):
+    """idx: global tile indices to cluster together. returns view dict."""
+    idx = np.asarray(idx)
+    n = len(idx)
+    sub = Xs[idx]
+    # embed
+    if HAS_UMAP and n >= 5:
+        nn = min(15, max(2, n-1))
+        emb = umap.UMAP(n_neighbors=nn, min_dist=0.1, n_components=2,
+                        random_state=RANDOM_STATE).fit_transform(sub)
+        em = "UMAP"
+    else:
+        k = min(2, sub.shape[1])
+        emb = PCA(n_components=2, random_state=RANDOM_STATE).fit_transform(sub) \
+              if n >= 3 else np.zeros((n, 2))
+        em = "PCA"
+    # cluster
+    if HAS_HDBSCAN and n >= 10:
+        mcs = max(5, n // MCS_DIVISOR)
+        lab = hdbscan.HDBSCAN(min_cluster_size=mcs).fit_predict(emb)
+        cm = f"HDBSCAN(mcs={mcs})"
+    elif n >= 6:
+        from sklearn.cluster import KMeans
+        from sklearn.metrics import silhouette_score
+        best = (-1, None, None)
+        for k in range(2, min(9, n)):
+            km = KMeans(n_clusters=k, n_init=10, random_state=RANDOM_STATE).fit(emb)
+            s = silhouette_score(emb, km.labels_)
+            if s > best[0]: best = (s, k, km.labels_)
+        lab = best[2]; cm = f"KMeans(k={best[1]})"
+    else:
+        lab = np.zeros(n, int); cm = "single"
+
+    # scatter png
+    fig, ax = plt.subplots(figsize=(6.6, 5.2))
+    for k, c in enumerate(sorted(set(lab))):
+        m = lab == c
+        col = "#bbbbbb" if c == -1 else palette[k % len(palette)]
+        ax.scatter(emb[m,0], emb[m,1], s=14, c=col, edgecolors="none", alpha=0.8,
+                   label=("noise" if c==-1 else f"c{c}"))
+    ax.set_title(f"{name} · {em} · {cm} · {n} tiles", fontsize=10)
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.legend(fontsize=8, markerscale=1.3, loc="best", framealpha=0.9)
+    fig.tight_layout()
+    buf = BytesIO(); fig.savefig(buf, format="png", dpi=104, facecolor="white")
+    plt.close(fig)
+    scatter_png = base64.b64encode(buf.getvalue()).decode()
+
+    # clusters
+    clusters = []
+    members = {}
+    for c in sorted(set(lab)):
+        local = np.where(lab == c)[0]
+        gidx = idx[local]
+        centroid = aligned_maps[gidx].mean(axis=0)
+        rad_m = radial_all[gidx].mean(axis=0)
+        lname = "noise" if c == -1 else label_cluster(
+            rad_m, aniso_all[gidx].mean(), moran_all[gidx].mean(), cen_all[gidx].mean())
+        clusters.append(dict(
+            cid=int(c), label=lname, n=int(len(gidx)),
+            aniso=round(float(aniso_all[gidx].mean()),3),
+            moran=round(float(moran_all[gidx].mean()),3),
+            centroid_png=render_map(centroid, f"{name} · c{c} · {lname} · n={len(gidx)}"),
+        ))
+        members[int(c)] = [int(g) for g in gidx]
+    clusters.sort(key=lambda d: (d["cid"]==-1, -d["n"]))
+    return dict(name=name, n=n, embed=em, cluster=cm,
+                scatter_png=scatter_png, clusters=clusters, members=members, labels=lab)
+
+# ALL view
+print("clustering: ALL")
+views = []
+all_view = run_view("ALL", np.arange(len(F)))
+views.append(all_view)
+
+# assign GLOBAL cluster label back to records (for CSV)
+glab = all_view["labels"]
+gid2name = {cc["cid"]: cc["label"] for cc in all_view["clusters"]}
 for i, r in enumerate(records):
-    r["cluster"] = int(labels[i]); r["label"] = cid2lab[int(labels[i])]
+    r["cluster"] = int(glab[i]); r["label"] = gid2name[int(glab[i])]
+
+# per-LOTID views
+lot_key = cmap.get("lotid")
+if lot_key and lot_key in records[0]:
+    from collections import defaultdict
+    lot_idx = defaultdict(list)
+    for i, r in enumerate(records):
+        lot_idx[r[lot_key]].append(i)
+    # tile 많은 LOT 우선, 최소 tile 이상만
+    lots = sorted([(lot, ix) for lot, ix in lot_idx.items() if len(ix) >= MIN_TILES_PER_VIEW],
+                  key=lambda kv: -len(kv[1]))[:MAX_LOT_VIEWS]
+    for lot, ix in lots:
+        print(f"clustering: LOT {lot}  ({len(ix)} tiles)")
+        views.append(run_view(f"LOT {lot}", ix))
+else:
+    print("lotid 칼럼 없음 — per-lot 뷰 생략")
+
+# 호환용 변수 (이후 코드)
+embed_method = all_view["embed"]; cluster_method = all_view["cluster"]
+clusters = all_view["clusters"]
 
 # ---------- sparse tile data for interactive member maps ----------
 POS = [[int(cxs[i]), int(cys[i])] for i in range(NCAN)]
@@ -362,27 +427,7 @@ for i, r in enumerate(records):
     pairs = [[int(k), int(round(float(amap[k]) * total))] for k in nz]
     pairs = [pq for pq in pairs if pq[1] > 0]
     wid = " · ".join(str(r[k]) for k in wkeys)
-    tiles_js.append({"w": wid, "ft": r["fail_type"], "c": int(labels[i]),
-                     "n": int(total), "nz": pairs})
-
-
-# ---------- UMAP scatter ----------
-palette = ["#E24B4A","#378ADD","#1D9E75","#EF9F27","#7F77DD","#D8568A",
-           "#41B0C4","#9E6B1D","#6FB03A","#C44141","#5A6ACF","#B0843A"]
-fig, ax = plt.subplots(figsize=(7,5.5))
-for k, c in enumerate(uniq):
-    idx = labels == c
-    col = "#999999" if c == -1 else palette[k % len(palette)]
-    ax.scatter(emb[idx,0], emb[idx,1], s=14, c=col,
-               label=("noise" if c==-1 else f"c{c}: {cid2lab[c]}"),
-               edgecolors="none", alpha=0.8)
-ax.set_title(f"{embed_method} embedding · {cluster_method}", fontsize=11)
-ax.set_xticks([]); ax.set_yticks([])
-ax.legend(fontsize=8, markerscale=1.4, loc="best", framealpha=0.9)
-fig.tight_layout()
-buf = BytesIO(); fig.savefig(buf, format="png", dpi=110, facecolor="white")
-plt.close(fig)
-scatter_png = base64.b64encode(buf.getvalue()).decode()
+    tiles_js.append({"w": wid, "ft": r["fail_type"], "n": int(total), "nz": pairs})
 
 
 # ---------- CSV ----------
@@ -400,130 +445,117 @@ print(f"CSV saved -> {OUTPUT_CSV}  ({len(out_rows)} tiles)")
 # ---------- HTML ----------
 def img(b): return f"<img src='data:image/png;base64,{b}'>"
 
-clusters_sorted = sorted(clusters, key=lambda c: (c["cid"] == -1, -c["n"]))
-
-cluster_blocks = []
-for cc in clusters_sorted:
-    cluster_blocks.append(f"""<div class="cl">
-      <div class="cen">{img(cc['centroid_png'])}</div>
-      <div class="body">
-        <h3>cluster {cc['cid']} &mdash; {cc['label']}</h3>
-        <div class="st">members: {cc['n']} &middot; Moran's I: {cc['moran']} &middot; anisotropy: {cc['aniso']}</div>
-        <button class="showbtn" data-c="{cc['cid']}">▶ 멤버 wafer map 보기 ({cc['n']})</button>
-        <div class="members" id="mem-{cc['cid']}"></div>
-      </div>
+view_members = {}
+view_blocks = []
+for vi, vw in enumerate(views):
+    view_members[vw["name"]] = vw["members"]
+    blocks = []
+    for cc in vw["clusters"]:
+        vk = f"{vi}_{cc['cid']}"
+        blocks.append(f"""<div class="cl">
+          <div class="cen">{img(cc['centroid_png'])}</div>
+          <div class="body">
+            <h3>cluster {cc['cid']} &mdash; {cc['label']}</h3>
+            <div class="st">members: {cc['n']} &middot; Moran's I: {cc['moran']} &middot; anisotropy: {cc['aniso']}</div>
+            <button class="showbtn" data-vk="{vk}" data-view="{vw['name']}" data-c="{cc['cid']}">&#9654; \uba64\ubc84 wafer map \ubcf4\uae30 ({cc['n']})</button>
+            <div class="members" id="mem-{vk}"></div>
+          </div>
+        </div>""")
+    ncl = len([c for c in vw["clusters"] if c["cid"] != -1])
+    view_blocks.append(f"""<div class="view" data-view="{vw['name']}" style="{'display:none' if vi else ''}">
+      <div class="vmeta">{vw['name']} &middot; {vw['n']} tiles &middot; {vw['embed']} &middot; {vw['cluster']} &middot; {ncl} clusters (+noise)</div>
+      <div class="scatter">{img(vw['scatter_png'])}</div>
+      {''.join(blocks)}
     </div>""")
 
-js_payload = {
-    "POS": POS,
-    "TILES": tiles_js,
-}
+options = "".join(
+    f"<option value='{vw['name']}'>"
+    f"{'\uc804\uccb4 (ALL)' if vw['name']=='ALL' else vw['name']} &mdash; {vw['n']} tiles</option>"
+    for vw in views)
+
+js_payload = {"POS": POS, "TILES": tiles_js, "VIEWMEM": view_members}
 
 H = [f"""<!doctype html><html><head><meta charset="utf-8"><title>Wafer Cluster Report</title>
 <style>
-body{{font-family:system-ui,sans-serif;background:#ffffff;color:#1a1f29;margin:0;padding:24px;
-     max-width:1300px;margin:auto}}
+body{{font-family:system-ui,sans-serif;background:#ffffff;color:#1a1f29;margin:0;padding:24px;max-width:1300px;margin:auto}}
 h1{{color:#b3460f;font-size:20px;border-bottom:1px solid #e2e5ea;padding-bottom:10px}}
-h2{{color:#b3460f;font-size:13px;margin-top:30px;text-transform:uppercase;letter-spacing:.05em}}
-.meta{{color:#5c6470;font-size:12px;font-family:ui-monospace,monospace;line-height:1.7}}
+.meta{{color:#5c6470;font-size:12px;font-family:ui-monospace,monospace;line-height:1.7;margin-top:8px}}
+.viewbar{{margin:20px 0 10px;display:flex;align-items:center;gap:10px}}
+.viewbar label{{font-size:12px;color:#b3460f;text-transform:uppercase;letter-spacing:.05em}}
+#viewSel{{background:#fff;border:1px solid #d0d4da;color:#1a1f29;padding:8px 12px;border-radius:5px;font-size:13px;font-family:ui-monospace,monospace;min-width:280px}}
+#viewSel:hover{{border-color:#b3460f}}
+.vmeta{{color:#5c6470;font-size:12px;font-family:ui-monospace,monospace;margin:6px 0}}
 img{{background:#fff;border-radius:4px}}
-.scatter img{{max-width:100%;margin-top:8px}}
-.cl{{display:flex;gap:16px;align-items:flex-start;background:#f6f7f9;border:1px solid #e2e5ea;
-     border-radius:8px;padding:14px;margin:10px 0}}
+.scatter img{{max-width:100%;margin:8px 0}}
+.cl{{display:flex;gap:16px;align-items:flex-start;background:#f6f7f9;border:1px solid #e2e5ea;border-radius:8px;padding:14px;margin:10px 0}}
 .cl .cen{{flex-shrink:0}}
 .cl .body{{flex:1;min-width:0}}
 .cl h3{{margin:0 0 4px;font-size:14px;color:#b3460f}}
 .cl .st{{color:#5c6470;font-size:11px;font-family:ui-monospace,monospace;margin-bottom:8px}}
-.showbtn{{background:#fff;border:1px solid #d0d4da;color:#b3460f;border-radius:5px;
-          padding:6px 12px;font-size:12px;cursor:pointer;font-family:ui-monospace,monospace}}
+.showbtn{{background:#fff;border:1px solid #d0d4da;color:#b3460f;border-radius:5px;padding:6px 12px;font-size:12px;cursor:pointer;font-family:ui-monospace,monospace}}
 .showbtn:hover{{border-color:#b3460f;background:#fff6f0}}
-.members{{display:none;margin-top:12px;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));
-          gap:10px}}
+.members{{display:none;margin-top:12px;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px}}
 .members.open{{display:grid}}
 .tile{{text-align:center;cursor:pointer}}
-.tile canvas{{width:108px;height:108px;border:1px solid #e2e5ea;border-radius:4px;
-              background:#fff;image-rendering:pixelated}}
+.tile canvas{{width:108px;height:108px;border:1px solid #e2e5ea;border-radius:4px;background:#fff;image-rendering:pixelated}}
 .tile:hover canvas{{border-color:#b3460f}}
-.tile .cap{{font-size:9px;color:#5c6470;font-family:ui-monospace,monospace;margin-top:3px;
-            line-height:1.3;word-break:break-word}}
-.more{{grid-column:1/-1;color:#5c6470;font-size:11px;font-family:ui-monospace,monospace;
-       padding:6px;text-align:center}}
-/* modal */
-#modal{{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;
-        align-items:center;justify-content:center}}
+.tile .cap{{font-size:9px;color:#5c6470;font-family:ui-monospace,monospace;margin-top:3px;line-height:1.3;word-break:break-word}}
+.more{{grid-column:1/-1;color:#5c6470;font-size:11px;font-family:ui-monospace,monospace;padding:6px;text-align:center}}
+#modal{{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;align-items:center;justify-content:center}}
 #modal.open{{display:flex}}
 #modalBox{{background:#fff;border-radius:8px;padding:18px;text-align:center;max-width:90vw}}
-#modalBox canvas{{width:440px;height:440px;max-width:80vw;image-rendering:pixelated;
-                  border:1px solid #e2e5ea;border-radius:4px}}
+#modalBox canvas{{width:440px;height:440px;max-width:80vw;image-rendering:pixelated;border:1px solid #e2e5ea;border-radius:4px}}
 #modalBox .mc{{font-size:12px;color:#1a1f29;font-family:ui-monospace,monospace;margin-top:10px}}
 #modalBox .close{{float:right;cursor:pointer;color:#5c6470;font-size:18px;line-height:1}}
 </style></head><body>
-<h1>WAFER FAIL PATTERN — CLUSTER CATALOG</h1>
+<h1>WAFER FAIL PATTERN &mdash; CLUSTER CATALOG</h1>
 <div class="meta">
-files: {len(paths)} &middot; tiles (after filter): {len(F)} &middot;
-feature dim: {F.shape[1]} &middot; fail types: {len(use_types)} &middot;
-embed: {embed_method} &middot; cluster: {cluster_method}<br>
-filter: coverage &ge; {MIN_COVERAGE}, total &ge; {MIN_TOTAL} &middot; wafer keys: {wkeys}
+files: {len(paths)} &middot; tiles: {len(F)} &middot; feature dim: {F.shape[1]} &middot; fail types: {len(use_types)} &middot; views: {len(views)} (ALL + per-LOT)<br>
+filter: coverage &ge; {MIN_COVERAGE}, total &ge; {MIN_TOTAL} &middot; wafer keys: {wkeys} &middot; mcs = n//{MCS_DIVISOR}
 </div>
-<h2>Embedding</h2>
-<div class="scatter">{img(scatter_png)}</div>
-<h2>Clusters ({len([c for c in clusters if c['cid']!=-1])} + noise)</h2>
-{''.join(cluster_blocks)}
+<div class="viewbar"><label>view</label><select id="viewSel">{options}</select></div>
+{''.join(view_blocks)}
 <div id="modal"><div id="modalBox">
-  <span class="close" onclick="document.getElementById('modal').classList.remove('open')">×</span>
+  <span class="close" onclick="document.getElementById('modal').classList.remove('open')">&times;</span>
   <div style="clear:both"></div><canvas id="modalCv" width="440" height="440"></canvas>
   <div class="mc" id="modalCap"></div>
 </div></div>
 <script>
 const D = {json.dumps(js_payload, separators=(',',':'))};
-const POS = D.POS, TILES = D.TILES;
-const MAX_SHOW = 120;   // 클러스터당 최대 표시 (성능)
-
-// extent
+const POS = D.POS, TILES = D.TILES, VIEWMEM = D.VIEWMEM;
+const MAX_SHOW = 120;
 let XMIN=1e9,XMAX=-1e9,YMIN=1e9,YMAX=-1e9;
 for(const [x,y] of POS){{ if(x<XMIN)XMIN=x; if(x>XMAX)XMAX=x; if(y<YMIN)YMIN=y; if(y>YMAX)YMAX=y; }}
 const XSPAN=XMAX-XMIN+1, YSPAN=YMAX-YMIN+1;
-
 function heat(t){{
-  // fault 작을수록 밝게(흰색), 클수록 어둡게(진한 빨강)
   t=Math.max(0,Math.min(1,t));
   const s=[[255,255,255],[247,206,170],[221,110,80],[150,30,28],[90,12,12]];
   const seg=t*(s.length-1),i=Math.floor(seg),f=seg-i;
   const a=s[i],b=s[Math.min(i+1,s.length-1)];
   return `rgb(${{Math.round(a[0]+(b[0]-a[0])*f)}},${{Math.round(a[1]+(b[1]-a[1])*f)}},${{Math.round(a[2]+(b[2]-a[2])*f)}})`;
 }}
-
 function drawTile(cv, tile){{
   const ctx=cv.getContext('2d'), W=cv.width, H=cv.height;
   ctx.fillStyle='#eef0f2'; ctx.fillRect(0,0,W,H);
-  const cw=W/XSPAN, ch=H/YSPAN, cell=Math.min(cw,ch);
+  const cell=Math.min(W/XSPAN, H/YSPAN);
   let mx=0; for(const [idx,c] of tile.nz){{const l=Math.log1p(c); if(l>mx)mx=l;}} mx=mx||1;
-  // 모든 die 를 흰색으로(=fault 없음/적음), 그다음 fail 을 진하게
   ctx.fillStyle='#ffffff';
-  for(const [x,y] of POS){{
-    ctx.fillRect((x-XMIN)*cell, (YMAX-y)*cell, Math.ceil(cell), Math.ceil(cell));
-  }}
+  for(const [x,y] of POS) ctx.fillRect((x-XMIN)*cell,(YMAX-y)*cell,Math.ceil(cell),Math.ceil(cell));
   for(const [idx,c] of tile.nz){{
-    const p=POS[idx]; const t=Math.log1p(c)/mx;
-    ctx.fillStyle=heat(t);
-    ctx.fillRect((p[0]-XMIN)*cell, (YMAX-p[1])*cell, Math.ceil(cell), Math.ceil(cell));
+    const p=POS[idx]; ctx.fillStyle=heat(Math.log1p(c)/mx);
+    ctx.fillRect((p[0]-XMIN)*cell,(YMAX-p[1])*cell,Math.ceil(cell),Math.ceil(cell));
   }}
 }}
-
-// group tiles by cluster
-const byCluster={{}};
-TILES.forEach((t,i)=>{{ (byCluster[t.c]=byCluster[t.c]||[]).push(i); }});
-
+const rendered = {{}};
 document.querySelectorAll('.showbtn').forEach(btn=>{{
-  let rendered=false;
   btn.addEventListener('click',()=>{{
-    const c=parseInt(btn.dataset.c);
-    const box=document.getElementById('mem-'+c);
+    const vk=btn.dataset.vk, view=btn.dataset.view, c=parseInt(btn.dataset.c);
+    const box=document.getElementById('mem-'+vk);
     const open=box.classList.toggle('open');
-    btn.textContent=(open?'▼':'▶')+' 멤버 wafer map 보기 ('+(byCluster[c]||[]).length+')';
-    if(open && !rendered){{
-      rendered=true;
-      const idxs=(byCluster[c]||[]);
+    const idxs=(VIEWMEM[view] && VIEWMEM[view][c]) ? VIEWMEM[view][c] : [];
+    btn.innerHTML=(open?'&#9660;':'&#9654;')+' \uba64\ubc84 wafer map \ubcf4\uae30 ('+idxs.length+')';
+    if(open && !rendered[vk]){{
+      rendered[vk]=true;
       const show=idxs.slice(0,MAX_SHOW);
       const frag=document.createDocumentFragment();
       show.forEach(ti=>{{
@@ -535,22 +567,24 @@ document.querySelectorAll('.showbtn').forEach(btn=>{{
         d.appendChild(cv); d.appendChild(cap);
         d.addEventListener('click',()=>{{
           drawTile(document.getElementById('modalCv'), t);
-          document.getElementById('modalCap').textContent=t.ft+'  ·  '+t.w+'  ·  total '+t.n;
+          document.getElementById('modalCap').textContent=t.ft+'  \u00b7  '+t.w+'  \u00b7  total '+t.n;
           document.getElementById('modal').classList.add('open');
         }});
-        frag.appendChild(d);
-        drawTile(cv, t);
+        frag.appendChild(d); drawTile(cv, t);
       }});
       if(idxs.length>MAX_SHOW){{
         const m=document.createElement('div'); m.className='more';
-        m.textContent='... '+show.length+' / '+idxs.length+' 표시 (나머지는 CSV 참고)';
+        m.textContent='... '+show.length+' / '+idxs.length+' \ud45c\uc2dc (\ub098\uba38\uc9c0\ub294 CSV \ucc38\uace0)';
         frag.appendChild(m);
       }}
       box.appendChild(frag);
     }}
   }});
 }});
-
+document.getElementById('viewSel').addEventListener('change',e=>{{
+  const v=e.target.value;
+  document.querySelectorAll('.view').forEach(d=>{{ d.style.display=(d.dataset.view===v)?'':'none'; }});
+}});
 document.getElementById('modal').addEventListener('click',e=>{{
   if(e.target.id==='modal') e.currentTarget.classList.remove('open');
 }});
