@@ -340,21 +340,30 @@ for c in uniq:
     rad_m = radial_all[idx].mean(axis=0)
     lab = "noise" if c == -1 else label_cluster(
         rad_m, aniso_all[idx].mean(), moran_all[idx].mean(), cen_all[idx].mean())
-    # example tiles (up to 4 highest n_fail)
-    order = sorted(idx, key=lambda i: -records[i]["n_fail"])[:4]
     clusters.append(dict(
         cid=int(c), label=lab, n=len(idx),
         aniso=round(float(aniso_all[idx].mean()),3),
         moran=round(float(moran_all[idx].mean()),3),
         centroid_png=render_map(centroid, f"cluster {c} · {lab} · n={len(idx)}"),
-        examples=[(records[i]["fail_type"],
-                   render_map(aligned_maps[i], records[i]["fail_type"])) for i in order],
     ))
 
 # assign label back to records
 cid2lab = {cc["cid"]: cc["label"] for cc in clusters}
 for i, r in enumerate(records):
     r["cluster"] = int(labels[i]); r["label"] = cid2lab[int(labels[i])]
+
+# ---------- sparse tile data for interactive member maps ----------
+POS = [[int(cxs[i]), int(cys[i])] for i in range(NCAN)]
+tiles_js = []
+for i, r in enumerate(records):
+    amap = aligned_maps[i]
+    total = r["n_fail"]
+    nz = np.nonzero(amap)[0]
+    pairs = [[int(k), int(round(float(amap[k]) * total))] for k in nz]
+    pairs = [pq for pq in pairs if pq[1] > 0]
+    wid = " · ".join(str(r[k]) for k in wkeys)
+    tiles_js.append({"w": wid, "ft": r["fail_type"], "c": int(labels[i]),
+                     "n": int(total), "nz": pairs})
 
 
 # ---------- UMAP scatter ----------
@@ -392,24 +401,62 @@ print(f"CSV saved -> {OUTPUT_CSV}  ({len(out_rows)} tiles)")
 def img(b): return f"<img src='data:image/png;base64,{b}'>"
 
 clusters_sorted = sorted(clusters, key=lambda c: (c["cid"] == -1, -c["n"]))
+
+cluster_blocks = []
+for cc in clusters_sorted:
+    cluster_blocks.append(f"""<div class="cl">
+      <div class="cen">{img(cc['centroid_png'])}</div>
+      <div class="body">
+        <h3>cluster {cc['cid']} &mdash; {cc['label']}</h3>
+        <div class="st">members: {cc['n']} &middot; Moran's I: {cc['moran']} &middot; anisotropy: {cc['aniso']}</div>
+        <button class="showbtn" data-c="{cc['cid']}">▶ 멤버 wafer map 보기 ({cc['n']})</button>
+        <div class="members" id="mem-{cc['cid']}"></div>
+      </div>
+    </div>""")
+
+js_payload = {
+    "POS": POS,
+    "TILES": tiles_js,
+}
+
 H = [f"""<!doctype html><html><head><meta charset="utf-8"><title>Wafer Cluster Report</title>
 <style>
-body{{font-family:system-ui,sans-serif;background:#0c1118;color:#e6edf3;margin:0;padding:24px;
+body{{font-family:system-ui,sans-serif;background:#ffffff;color:#1a1f29;margin:0;padding:24px;
      max-width:1300px;margin:auto}}
-h1{{color:#ffb000;font-size:20px;border-bottom:1px solid #2c3645;padding-bottom:10px}}
-h2{{color:#ffb000;font-size:13px;margin-top:30px;text-transform:uppercase;letter-spacing:.05em}}
-.meta{{color:#8b949e;font-size:12px;font-family:ui-monospace,monospace;line-height:1.7}}
+h1{{color:#b3460f;font-size:20px;border-bottom:1px solid #e2e5ea;padding-bottom:10px}}
+h2{{color:#b3460f;font-size:13px;margin-top:30px;text-transform:uppercase;letter-spacing:.05em}}
+.meta{{color:#5c6470;font-size:12px;font-family:ui-monospace,monospace;line-height:1.7}}
 img{{background:#fff;border-radius:4px}}
 .scatter img{{max-width:100%;margin-top:8px}}
-.cl{{display:flex;gap:16px;align-items:flex-start;background:#161d28;border:1px solid #2c3645;
+.cl{{display:flex;gap:16px;align-items:flex-start;background:#f6f7f9;border:1px solid #e2e5ea;
      border-radius:8px;padding:14px;margin:10px 0}}
 .cl .cen{{flex-shrink:0}}
 .cl .body{{flex:1;min-width:0}}
-.cl h3{{margin:0 0 4px;font-size:14px;color:#ffb000}}
-.cl .st{{color:#8b949e;font-size:11px;font-family:ui-monospace,monospace;margin-bottom:8px}}
-.ex{{display:flex;gap:8px;flex-wrap:wrap}}
-.ex figure{{margin:0;text-align:center}}
-.ex figcaption{{color:#8b949e;font-size:9px;font-family:ui-monospace,monospace;margin-top:2px}}
+.cl h3{{margin:0 0 4px;font-size:14px;color:#b3460f}}
+.cl .st{{color:#5c6470;font-size:11px;font-family:ui-monospace,monospace;margin-bottom:8px}}
+.showbtn{{background:#fff;border:1px solid #d0d4da;color:#b3460f;border-radius:5px;
+          padding:6px 12px;font-size:12px;cursor:pointer;font-family:ui-monospace,monospace}}
+.showbtn:hover{{border-color:#b3460f;background:#fff6f0}}
+.members{{display:none;margin-top:12px;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));
+          gap:10px}}
+.members.open{{display:grid}}
+.tile{{text-align:center;cursor:pointer}}
+.tile canvas{{width:108px;height:108px;border:1px solid #e2e5ea;border-radius:4px;
+              background:#fff;image-rendering:pixelated}}
+.tile:hover canvas{{border-color:#b3460f}}
+.tile .cap{{font-size:9px;color:#5c6470;font-family:ui-monospace,monospace;margin-top:3px;
+            line-height:1.3;word-break:break-word}}
+.more{{grid-column:1/-1;color:#5c6470;font-size:11px;font-family:ui-monospace,monospace;
+       padding:6px;text-align:center}}
+/* modal */
+#modal{{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;
+        align-items:center;justify-content:center}}
+#modal.open{{display:flex}}
+#modalBox{{background:#fff;border-radius:8px;padding:18px;text-align:center;max-width:90vw}}
+#modalBox canvas{{width:440px;height:440px;max-width:80vw;image-rendering:pixelated;
+                  border:1px solid #e2e5ea;border-radius:4px}}
+#modalBox .mc{{font-size:12px;color:#1a1f29;font-family:ui-monospace,monospace;margin-top:10px}}
+#modalBox .close{{float:right;cursor:pointer;color:#5c6470;font-size:18px;line-height:1}}
 </style></head><body>
 <h1>WAFER FAIL PATTERN — CLUSTER CATALOG</h1>
 <div class="meta">
@@ -421,20 +468,94 @@ filter: coverage &ge; {MIN_COVERAGE}, total &ge; {MIN_TOTAL} &middot; wafer keys
 <h2>Embedding</h2>
 <div class="scatter">{img(scatter_png)}</div>
 <h2>Clusters ({len([c for c in clusters if c['cid']!=-1])} + noise)</h2>
-"""]
-for cc in clusters_sorted:
-    ex = "".join(f"<figure>{img(b)}<figcaption>{ft}</figcaption></figure>"
-                 for ft, b in cc["examples"])
-    H.append(f"""<div class="cl">
-      <div class="cen">{img(cc['centroid_png'])}</div>
-      <div class="body">
-        <h3>cluster {cc['cid']} &mdash; {cc['label']}</h3>
-        <div class="st">members: {cc['n']} &middot; Moran's I: {cc['moran']} &middot; anisotropy: {cc['aniso']}</div>
-        <div class="ex">{ex}</div>
-      </div>
-    </div>""")
-H.append("</body></html>")
-Path(OUTPUT_HTML).write_text("\n".join(H), encoding="utf-8")
+{''.join(cluster_blocks)}
+<div id="modal"><div id="modalBox">
+  <span class="close" onclick="document.getElementById('modal').classList.remove('open')">×</span>
+  <div style="clear:both"></div><canvas id="modalCv" width="440" height="440"></canvas>
+  <div class="mc" id="modalCap"></div>
+</div></div>
+<script>
+const D = {json.dumps(js_payload, separators=(',',':'))};
+const POS = D.POS, TILES = D.TILES;
+const MAX_SHOW = 120;   // 클러스터당 최대 표시 (성능)
+
+// extent
+let XMIN=1e9,XMAX=-1e9,YMIN=1e9,YMAX=-1e9;
+for(const [x,y] of POS){{ if(x<XMIN)XMIN=x; if(x>XMAX)XMAX=x; if(y<YMIN)YMIN=y; if(y>YMAX)YMAX=y; }}
+const XSPAN=XMAX-XMIN+1, YSPAN=YMAX-YMIN+1;
+
+function inferno(t){{
+  t=Math.max(0,Math.min(1,t));
+  const s=[[0,0,16],[90,26,110],[192,57,43],[232,130,30],[245,208,32]];
+  const seg=t*(s.length-1),i=Math.floor(seg),f=seg-i;
+  const a=s[i],b=s[Math.min(i+1,s.length-1)];
+  return `rgb(${{Math.round(a[0]+(b[0]-a[0])*f)}},${{Math.round(a[1]+(b[1]-a[1])*f)}},${{Math.round(a[2]+(b[2]-a[2])*f)}})`;
+}}
+
+function drawTile(cv, tile){{
+  const ctx=cv.getContext('2d'), W=cv.width, H=cv.height;
+  ctx.fillStyle='#f4f0e8'; ctx.fillRect(0,0,W,H);
+  const cw=W/XSPAN, ch=H/YSPAN, cell=Math.min(cw,ch);
+  let mx=0; for(const [idx,c] of tile.nz){{const l=Math.log1p(c); if(l>mx)mx=l;}} mx=mx||1;
+  // draw all canonical positions faint (wafer outline), then fails
+  ctx.fillStyle='#ffffff';
+  for(const [x,y] of POS){{
+    ctx.fillRect((x-XMIN)*cell, (YMAX-y)*cell, Math.ceil(cell), Math.ceil(cell));
+  }}
+  for(const [idx,c] of tile.nz){{
+    const p=POS[idx]; const t=Math.log1p(c)/mx;
+    ctx.fillStyle=inferno(t);
+    ctx.fillRect((p[0]-XMIN)*cell, (YMAX-p[1])*cell, Math.ceil(cell), Math.ceil(cell));
+  }}
+}}
+
+// group tiles by cluster
+const byCluster={{}};
+TILES.forEach((t,i)=>{{ (byCluster[t.c]=byCluster[t.c]||[]).push(i); }});
+
+document.querySelectorAll('.showbtn').forEach(btn=>{{
+  let rendered=false;
+  btn.addEventListener('click',()=>{{
+    const c=parseInt(btn.dataset.c);
+    const box=document.getElementById('mem-'+c);
+    const open=box.classList.toggle('open');
+    btn.textContent=(open?'▼':'▶')+' 멤버 wafer map 보기 ('+(byCluster[c]||[]).length+')';
+    if(open && !rendered){{
+      rendered=true;
+      const idxs=(byCluster[c]||[]);
+      const show=idxs.slice(0,MAX_SHOW);
+      const frag=document.createDocumentFragment();
+      show.forEach(ti=>{{
+        const t=TILES[ti];
+        const d=document.createElement('div'); d.className='tile';
+        const cv=document.createElement('canvas'); cv.width=108; cv.height=108;
+        const cap=document.createElement('div'); cap.className='cap';
+        cap.textContent=t.ft+'  ['+t.w+']';
+        d.appendChild(cv); d.appendChild(cap);
+        d.addEventListener('click',()=>{{
+          drawTile(document.getElementById('modalCv'), t);
+          document.getElementById('modalCap').textContent=t.ft+'  ·  '+t.w+'  ·  total '+t.n;
+          document.getElementById('modal').classList.add('open');
+        }});
+        frag.appendChild(d);
+        drawTile(cv, t);
+      }});
+      if(idxs.length>MAX_SHOW){{
+        const m=document.createElement('div'); m.className='more';
+        m.textContent='... '+show.length+' / '+idxs.length+' 표시 (나머지는 CSV 참고)';
+        frag.appendChild(m);
+      }}
+      box.appendChild(frag);
+    }}
+  }});
+}});
+
+document.getElementById('modal').addEventListener('click',e=>{{
+  if(e.target.id==='modal') e.currentTarget.classList.remove('open');
+}});
+</script>
+</body></html>"""]
+Path(OUTPUT_HTML).write_text("".join(H), encoding="utf-8")
 size = Path(OUTPUT_HTML).stat().st_size/1024
 print(f"HTML saved -> {OUTPUT_HTML}  ({size:.0f} KB)")
 print("\nDONE.")
