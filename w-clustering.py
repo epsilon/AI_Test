@@ -319,7 +319,7 @@ def render_map(values, title, vmaxp=None):
     v = np.log1p(values)
     vmax = vmaxp if vmaxp else (v.max() or 1)
     ax.scatter(cxs, cys, c=v, s=max(3, int((180/np.sqrt(NCAN))**2)),
-               marker="s", cmap="inferno", vmin=0, vmax=vmax, edgecolors="none")
+               marker="s", cmap="Reds", vmin=0, vmax=vmax, edgecolors="none")
     ax.set_aspect("equal"); ax.axis("off")
     ax.set_xlim(cxs.min()-1, cxs.max()+1); ax.set_ylim(cys.min()-1, cys.max()+1)
     fig.text(0.5, 0.94, title, ha="center", va="top", fontsize=8, color="#333")
@@ -484,9 +484,10 @@ let XMIN=1e9,XMAX=-1e9,YMIN=1e9,YMAX=-1e9;
 for(const [x,y] of POS){{ if(x<XMIN)XMIN=x; if(x>XMAX)XMAX=x; if(y<YMIN)YMIN=y; if(y>YMAX)YMAX=y; }}
 const XSPAN=XMAX-XMIN+1, YSPAN=YMAX-YMIN+1;
 
-function inferno(t){{
+function heat(t){{
+  // fault 작을수록 밝게(흰색), 클수록 어둡게(진한 빨강)
   t=Math.max(0,Math.min(1,t));
-  const s=[[0,0,16],[90,26,110],[192,57,43],[232,130,30],[245,208,32]];
+  const s=[[255,255,255],[247,206,170],[221,110,80],[150,30,28],[90,12,12]];
   const seg=t*(s.length-1),i=Math.floor(seg),f=seg-i;
   const a=s[i],b=s[Math.min(i+1,s.length-1)];
   return `rgb(${{Math.round(a[0]+(b[0]-a[0])*f)}},${{Math.round(a[1]+(b[1]-a[1])*f)}},${{Math.round(a[2]+(b[2]-a[2])*f)}})`;
@@ -494,17 +495,17 @@ function inferno(t){{
 
 function drawTile(cv, tile){{
   const ctx=cv.getContext('2d'), W=cv.width, H=cv.height;
-  ctx.fillStyle='#f4f0e8'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#eef0f2'; ctx.fillRect(0,0,W,H);
   const cw=W/XSPAN, ch=H/YSPAN, cell=Math.min(cw,ch);
   let mx=0; for(const [idx,c] of tile.nz){{const l=Math.log1p(c); if(l>mx)mx=l;}} mx=mx||1;
-  // draw all canonical positions faint (wafer outline), then fails
+  // 모든 die 를 흰색으로(=fault 없음/적음), 그다음 fail 을 진하게
   ctx.fillStyle='#ffffff';
   for(const [x,y] of POS){{
     ctx.fillRect((x-XMIN)*cell, (YMAX-y)*cell, Math.ceil(cell), Math.ceil(cell));
   }}
   for(const [idx,c] of tile.nz){{
     const p=POS[idx]; const t=Math.log1p(c)/mx;
-    ctx.fillStyle=inferno(t);
+    ctx.fillStyle=heat(t);
     ctx.fillRect((p[0]-XMIN)*cell, (YMAX-p[1])*cell, Math.ceil(cell), Math.ceil(cell));
   }}
 }}
