@@ -507,6 +507,10 @@ img{{background:#fff;border-radius:4px}}
 #modalBox canvas{{width:440px;height:440px;max-width:80vw;image-rendering:pixelated;border:1px solid #e2e5ea;border-radius:4px}}
 #modalBox .mc{{font-size:12px;color:#1a1f29;font-family:ui-monospace,monospace;margin-top:10px}}
 #modalBox .close{{float:right;cursor:pointer;color:#5c6470;font-size:18px;line-height:1}}
+#tip{{display:none;position:fixed;background:#1a1f29;color:#fff;font-size:11px;
+     font-family:ui-monospace,monospace;padding:3px 7px;border-radius:4px;pointer-events:none;z-index:200}}
+#modalCtl{{margin-top:8px;font-size:12px;color:#1a1f29;font-family:ui-monospace,monospace}}
+#modalCtl label{{cursor:pointer}}
 </style></head><body>
 <h1>WAFER FAIL PATTERN &mdash; CLUSTER CATALOG</h1>
 <div class="meta">
@@ -517,9 +521,11 @@ filter: coverage &ge; {MIN_COVERAGE}, total &ge; {MIN_TOTAL} &middot; wafer keys
 {''.join(view_blocks)}
 <div id="modal"><div id="modalBox">
   <span class="close" onclick="document.getElementById('modal').classList.remove('open')">&times;</span>
-  <div style="clear:both"></div><canvas id="modalCv" width="440" height="440"></canvas>
+  <div style="clear:both"></div><canvas id="modalCv" width="560" height="560"></canvas>
+  <div id="modalCtl"><label><input type="checkbox" id="showNum"> 숫자 표시 (die별 fail 값)</label></div>
   <div class="mc" id="modalCap"></div>
 </div></div>
+<div id="tip"></div>
 <script>
 const D = {json.dumps(js_payload, separators=(',',':'))};
 const POS = D.POS, TILES = D.TILES, VIEWMEM = D.VIEWMEM;
@@ -527,6 +533,8 @@ const MAX_SHOW = 120;
 let XMIN=1e9,XMAX=-1e9,YMIN=1e9,YMAX=-1e9;
 for(const [x,y] of POS){{ if(x<XMIN)XMIN=x; if(x>XMAX)XMAX=x; if(y<YMIN)YMIN=y; if(y>YMAX)YMAX=y; }}
 const XSPAN=XMAX-XMIN+1, YSPAN=YMAX-YMIN+1;
+const POSSET=new Set(POS.map(p=>p[0]+','+p[1]));
+let MODAL_TILE=null, MODAL_LOOKUP=new Map();
 function heat(t){{
   t=Math.max(0,Math.min(1,t));
   const s=[[255,255,255],[247,206,170],[221,110,80],[150,30,28],[90,12,12]];
@@ -565,11 +573,7 @@ document.querySelectorAll('.showbtn').forEach(btn=>{{
         const cap=document.createElement('div'); cap.className='cap';
         cap.textContent=t.ft+'  ['+t.w+']';
         d.appendChild(cv); d.appendChild(cap);
-        d.addEventListener('click',()=>{{
-          drawTile(document.getElementById('modalCv'), t);
-          document.getElementById('modalCap').textContent=t.ft+'  \u00b7  '+t.w+'  \u00b7  total '+t.n;
-          document.getElementById('modal').classList.add('open');
-        }});
+        d.addEventListener('click',()=>openModal(t));
         frag.appendChild(d); drawTile(cv, t);
       }});
       if(idxs.length>MAX_SHOW){{
@@ -581,6 +585,54 @@ document.querySelectorAll('.showbtn').forEach(btn=>{{
     }}
   }});
 }});
+function openModal(t){{
+  MODAL_TILE=t;
+  MODAL_LOOKUP=new Map();
+  for(const [idx,c] of t.nz){{const p=POS[idx]; MODAL_LOOKUP.set(p[0]+','+p[1], c);}}
+  document.getElementById('modalCap').textContent=t.ft+'  \u00b7  '+t.w+'  \u00b7  total '+t.n;
+  drawModal();
+  document.getElementById('modal').classList.add('open');
+}}
+function drawModal(){{
+  const cv=document.getElementById('modalCv'); const t=MODAL_TILE; if(!t)return;
+  const ctx=cv.getContext('2d'), W=cv.width, H=cv.height;
+  ctx.fillStyle='#eef0f2'; ctx.fillRect(0,0,W,H);
+  const cell=Math.min(W/XSPAN, H/YSPAN);
+  let mx=0; for(const [idx,c] of t.nz){{const l=Math.log1p(c); if(l>mx)mx=l;}} mx=mx||1;
+  ctx.fillStyle='#ffffff';
+  for(const [x,y] of POS) ctx.fillRect((x-XMIN)*cell,(YMAX-y)*cell,Math.ceil(cell),Math.ceil(cell));
+  const showN=document.getElementById('showNum').checked;
+  ctx.font=Math.max(6,Math.floor(cell*0.5))+'px ui-monospace,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  for(const [idx,c] of t.nz){{
+    const p=POS[idx]; const tt=Math.log1p(c)/mx;
+    const px=(p[0]-XMIN)*cell, py=(YMAX-p[1])*cell;
+    ctx.fillStyle=heat(tt);
+    ctx.fillRect(px,py,Math.ceil(cell),Math.ceil(cell));
+    if(showN && cell>=9){{
+      ctx.fillStyle = tt>0.55 ? '#fff' : '#222';
+      ctx.fillText(String(c), px+cell/2, py+cell/2);
+    }}
+  }}
+}}
+document.getElementById('showNum').addEventListener('change',drawModal);
+(function(){{
+  const cv=document.getElementById('modalCv'); const tip=document.getElementById('tip');
+  cv.addEventListener('mousemove',e=>{{
+    if(!MODAL_TILE)return;
+    const rect=cv.getBoundingClientRect(); const scale=cv.width/rect.width;
+    const cell=Math.min(cv.width/XSPAN, cv.height/YSPAN);
+    const mxp=(e.clientX-rect.left)*scale, myp=(e.clientY-rect.top)*scale;
+    const gx=Math.floor(mxp/cell)+XMIN, gy=YMAX-Math.floor(myp/cell);
+    const key=gx+','+gy;
+    if(POSSET.has(key)){{
+      tip.style.display='block';
+      tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY+12)+'px';
+      tip.textContent='('+gx+','+gy+') = '+(MODAL_LOOKUP.get(key)||0);
+    }} else tip.style.display='none';
+  }});
+  cv.addEventListener('mouseleave',()=>{{tip.style.display='none';}});
+}})();
 document.getElementById('viewSel').addEventListener('change',e=>{{
   const v=e.target.value;
   document.querySelectorAll('.view').forEach(d=>{{ d.style.display=(d.dataset.view===v)?'':'none'; }});
