@@ -1,13 +1,14 @@
 """
-column_profiler.py — fail 칼럼 진단
+column_profiler.py  (v2) — fail 칼럼 진단 + 클러스터링 칼럼 자동 선별
 
-클러스터링 전에 각 fail 칼럼이 실제로 어떻게 생겼는지 파악한다.
-- fill_rate : 값이 0이 아닌 die 비율 (희소도)
-- nonzero_wafers : 그 칼럼에 fail 이 하나라도 있는 wafer 비율
-- spatial_score : die 별 분포가 공간적 패턴을 갖는지 (Moran's I 근사)
-출력: column_profile.csv  +  콘솔 요약
+핵심 추가: between-wafer 변별력(discrimination).
+  total 이 커도 모든 wafer 에 비슷하게 나오면 wafer 구분에 쓸모없다.
+  wafer 마다 '다르게' 나오는 칼럼이 진짜 신호.
 
-목적: 어떤 칼럼이 (A) 공간 맵 / (B) 희소 플래그 / (C) 거의 안 쓰임 인지 자동 분류
+출력:
+  - column_profile.csv     : 전체 칼럼 진단표 (파일로 저장, 칠 필요 없음)
+  - selected_columns.txt   : 클러스터링 추천 칼럼 (wafer_cluster_poc 가 자동으로 읽음)
+  - 콘솔에는 요약 몇 줄만
 """
 
 # === CONFIG ===
@@ -24,6 +25,20 @@ try: WAFER_KEYS
 except NameError: WAFER_KEYS=["lotid","waferseq","item","temp"]
 try: OUTPUT_CSV
 except NameError: OUTPUT_CSV="column_profile.csv"
+try: SELECTED_TXT
+except NameError: SELECTED_TXT="selected_columns.txt"
+
+# 선별 기준
+try: MIN_FILL
+except NameError: MIN_FILL = 0.02       # die 채움 최소
+try: MIN_MORAN
+except NameError: MIN_MORAN = 0.15      # 공간 패턴 최소
+try: MIN_DISCRIM
+except NameError: MIN_DISCRIM = 0.6     # between-wafer 변별력 최소 (CV)
+try: MAX_UBIQUITY
+except NameError: MAX_UBIQUITY = 0.97   # 이 비율 이상의 wafer 에 나오면 '배경'으로 보고 제외
+try: N_SELECT
+except NameError: N_SELECT = 80         # 최대 추천 칼럼 수
 
 import re, glob
 import numpy as np, pandas as pd
@@ -33,7 +48,6 @@ print(f"reading {len(paths)} file(s)...")
 dfs=[]
 for p in paths:
     d=pd.read_csv(p, skiprows=[1] if SKIP_TYPE_ROW else None, low_memory=False)
-    d["__source__"]=p
     dfs.append(d)
 df=pd.concat(dfs,ignore_index=True,sort=False)
 print(f"rows: {len(df):,}  cols: {len(df.columns)}")
@@ -42,10 +56,9 @@ cmap={c.lower():c for c in df.columns}
 x_col,y_col=cmap["xdiepos"],cmap["ydiepos"]
 df[x_col]=pd.to_numeric(df[x_col],errors="coerce")
 df[y_col]=pd.to_numeric(df[y_col],errors="coerce")
-df=df.dropna(subset=[x_col,y_col])
+df=df.dropna(subset=[x_col,y_col]).reset_index(drop=True)
 df[x_col]=df[x_col].astype(int); df[y_col]=df[y_col].astype(int)
 
-# fail 칼럼 = fail_cnt_total 뒤
 marker=None
 for cand in ("fail_cnt_total","failcnt_total","fail_total"):
     if cand in cmap: marker=cmap[cand]; break
@@ -53,45 +66,40 @@ if marker is not None:
     b=list(df.columns).index(marker); fail_cols=list(df.columns[b+1:])
 else:
     fail_cols=[c for c in df.columns if re.match(r"^fail",c,re.I)]
-fail_cols=[c for c in fail_cols if c!="__source__"]
-print(f"fail columns: {len(fail_cols)}")
 
-# 칼럼명 기반 1차 분류
 def name_class(c):
     cl=c.lower()
-    if cl.startswith("i_"): return "i_ (집계 추정)"
-    if cl.startswith("g_"): return "g_ (geometry)"
-    if cl.startswith("mfm"): return "mfm_ (특수)"
-    if "total" in cl: return "denominator(total)"
-    return "spatial(추정)"
+    if cl.startswith("i_"): return "i_"
+    if cl.startswith("g_"): return "g_"
+    if cl.startswith("mfm"): return "mfm_"
+    if "total" in cl: return "total"
+    return "spatial"
 
-# fail mode 축 1차 분류
 def fail_axis(c):
     cl=c.lower()
-    for k in ["srow","frow","row"]:
-        if cl.startswith(k) or cl.startswith("i_row") or cl.startswith("i_srow"): return "row(WL)"
-    for k in ["scol","fcol","col"]:
-        if cl.startswith(k) or cl.startswith("i_col") or cl.startswith("i_scol"): return "col(BL)"
-    if cl.startswith("fmat") or cl.startswith("block"): return "mat/block"
-    if cl.startswith("bank") or "bnk" in cl or "bkg" in cl or cl=="chip": return "bank/chip"
-    if any(cl.startswith(k) for k in ["bx2","by2","biso","snbrg","iso","i_iso","s_iso","s_snc","s_nfc"]): return "bridge/iso"
-    if cl.startswith("g_") or cl.startswith("mfm") or cl.startswith("nfc"): return "geometry/etc"
-    if cl.startswith("i_bit") or cl.startswith("i_group"): return "bit/group"
+    # i_single_bank / halfbank 도 bank 로
+    if "bank" in cl or "halfbank" in cl or "bnk" in cl or "bkg" in cl or cl=="chip":
+        if "row" in cl: return "row(WL)"
+        if "col" in cl: return "col(BL)"
+        return "bank/chip"
+    if cl.startswith(("srow","frow","row")) or cl.startswith(("i_row","i_srow")): return "row(WL)"
+    if cl.startswith(("scol","fcol","col")) or cl.startswith(("i_col","i_scol")): return "col(BL)"
+    if cl.startswith(("fmat","block")): return "mat/block"
+    if cl.startswith(("bx2","by2","biso","snbrg","iso","i_iso","s_iso","s_snc","s_nfc","ee_","oe_","oo_","eo_","snc","sn_","triple","single","dual")): return "bridge/iso"
+    if cl.startswith(("g_","mfm","nfc")): return "geometry/etc"
+    if cl.startswith(("i_bit","i_group","group")): return "bit/group"
     return "other"
 
-# 좌표 그리드(공간성 측정용)
-pos = df[[x_col,y_col]].drop_duplicates().sort_values([y_col,x_col]).reset_index(drop=True)
-xs=pos[x_col].values; ys=pos[y_col].values
-xmin,ymin=xs.min(),ys.min()
+# 좌표 그리드(공간성)
+pos=df[[x_col,y_col]].drop_duplicates().sort_values([y_col,x_col]).reset_index(drop=True)
+xs=pos[x_col].values; ys=pos[y_col].values; xmin,ymin=xs.min(),ys.min()
+xspan=xs.max()-xmin+1; yspan=ys.max()-ymin+1
 GRID=8
-def coarse(vals_by_pos):
-    G=np.zeros((GRID,GRID)); cnt=np.zeros((GRID,GRID))
-    xspan=xs.max()-xmin+1; yspan=ys.max()-ymin+1
-    for (x,y),v in vals_by_pos.items():
+def morans_of(agg):
+    G=np.zeros((GRID,GRID))
+    for (x,y),v in agg.items():
         gi=min(int((y-ymin)/yspan*GRID),GRID-1); gj=min(int((x-xmin)/xspan*GRID),GRID-1)
         G[gi,gj]+=v
-    return G
-def morans(G):
     g=G.flatten(); m=g.mean(); gm=G-m; den=(gm**2).sum()
     if den==0: return 0.0
     num=0;W=0
@@ -102,44 +110,65 @@ def morans(G):
                 if 0<=ni<GRID and 0<=nj<GRID: num+=gm[i,j]*gm[ni,nj];W+=1
     return (G.size/W)*(num/den) if (W and den) else 0.0
 
-wkeys=[cmap[k.lower()] for k in WAFER_KEYS if k.lower() in cmap] or ["__source__"]
+wkeys=[cmap[k.lower()] for k in WAFER_KEYS if k.lower() in cmap] or None
+if wkeys is None:
+    df["__w__"]="all"; wkeys=["__w__"]
 n_wafers=df.groupby(wkeys).ngroups
-N=len(df)
+wafer_id=df.groupby(wkeys).ngroup().values   # 각 row 의 wafer index
+
+print(f"wafers: {n_wafers}, fail columns: {len(fail_cols)}  — profiling...")
 
 rows=[]
 for c in fail_cols:
-    v=pd.to_numeric(df[c],errors="coerce").fillna(0).values
-    nz=(v>0)
-    fill=nz.mean()
-    # wafer 단위로 값이 있는 비율
-    tmp=df[wkeys].copy(); tmp["_v"]=v
-    wnz=tmp.groupby(wkeys)["_v"].max()
-    wafer_hit=(wnz>0).mean()
-    # 공간성: 전체 die 합쳐서 좌표별 평균 → Moran's I (대표값)
-    sp=np.nan
+    v=pd.to_numeric(df[c],errors="coerce").fillna(0).values.astype(float)
+    fill=(v>0).mean()
+    # wafer 별 합
+    ws=np.bincount(wafer_id, weights=v, minlength=n_wafers)
+    wafer_hit=(ws>0).mean()
+    # between-wafer 변별력 = CV (std/mean) of wafer sums
+    mean_w=ws.mean()
+    discrim = (ws.std()/mean_w) if mean_w>0 else 0.0
+    # 공간성 (fill 있을 때만)
+    sp=0.0
     if fill>0.005:
-        agg=tmp.groupby([df[x_col],df[y_col]])["_v"].sum().to_dict()
-        sp=round(morans(coarse(agg)),3)
+        agg={}
+        # 좌표별 합 (빠르게)
+        tmpx=df[x_col].values; tmpy=df[y_col].values
+        # 합산
+        key=tmpx.astype(np.int64)*100000+tmpy.astype(np.int64)
+        order=np.argsort(key)
+        ks=key[order]; vs=v[order]
+        uniq_k, idx_start=np.unique(ks, return_index=True)
+        sums=np.add.reduceat(vs, idx_start)
+        for kk,ss in zip(uniq_k,sums):
+            agg[(int(kk//100000), int(kk%100000))]=ss
+        sp=round(morans_of(agg),3)
     rows.append(dict(column=c, name_class=name_class(c), fail_axis=fail_axis(c),
                      fill_rate=round(float(fill),4), wafer_hit=round(float(wafer_hit),3),
-                     total=int(v.sum()), max_die=int(v.max()), spatial_moran=sp))
+                     discrim=round(float(discrim),3), spatial_moran=sp,
+                     total=int(v.sum()), max_die=int(v.max())))
 
-prof=pd.DataFrame(rows).sort_values("total",ascending=False)
+prof=pd.DataFrame(rows)
 prof.to_csv(OUTPUT_CSV,index=False)
-print(f"\nsaved -> {OUTPUT_CSV}  ({len(prof)} columns)\n")
 
-print("=== name_class 별 칼럼 수 ===")
-print(prof["name_class"].value_counts(), "\n")
-print("=== fail_axis 별 칼럼 수 ===")
-print(prof["fail_axis"].value_counts(), "\n")
-print("=== fill_rate 분포 (die 중 0 아닌 비율) ===")
-print("  거의 빈 칼럼 (fill<0.5%):", (prof["fill_rate"]<0.005).sum())
-print("  희소 (0.5~5%)         :", ((prof["fill_rate"]>=0.005)&(prof["fill_rate"]<0.05)).sum())
-print("  중간 (5~30%)          :", ((prof["fill_rate"]>=0.05)&(prof["fill_rate"]<0.30)).sum())
-print("  조밀 (>30%)           :", (prof["fill_rate"]>=0.30).sum())
-print()
-print("=== 클러스터링에 쓸만한 칼럼 (fill>2% & spatial_moran>0.2) ===")
-good=prof[(prof["fill_rate"]>0.02)&(prof["spatial_moran"]>0.2)]
-print(f"  {len(good)} 개")
-print(good[["column","fail_axis","fill_rate","total","spatial_moran"]].head(25).to_string(index=False))
-print(f"\n총 wafer 수: {n_wafers}, 총 die-row: {N:,}")
+# 선별: 공간성 있고 + wafer 변별력 있고 + 배경(거의 모든 wafer) 아닌 것
+sel = prof[(prof["fill_rate"]>=MIN_FILL) &
+           (prof["spatial_moran"]>=MIN_MORAN) &
+           (prof["discrim"]>=MIN_DISCRIM) &
+           (prof["wafer_hit"]<=MAX_UBIQUITY)].copy()
+sel = sel.sort_values("discrim", ascending=False).head(N_SELECT)
+sel["column"].to_csv(SELECTED_TXT, index=False, header=False)
+
+# ===== 콘솔 요약 (짧게) =====
+print(f"\nsaved: {OUTPUT_CSV} (전체 {len(prof)}), {SELECTED_TXT} (선별 {len(sel)})")
+print(f"\n[선별 칼럼 axis 분포]")
+for ax,n in sel["fail_axis"].value_counts().items():
+    print(f"  {ax}: {n}")
+print(f"\n[선별 상위 20 — wafer 변별력 순]")
+for _,r in sel.head(20).iterrows():
+    print(f"  {r['column'][:28]:28s} {r['fail_axis'][:10]:10s} "
+          f"discrim={r['discrim']:.2f} fill={r['fill_rate']:.2f} moran={r['spatial_moran']:.2f}")
+print(f"\n[참고] 제외된 '배경' 칼럼 예시 (total 큰데 변별력 낮은 것):")
+bg=prof[(prof["fill_rate"]>0.3)&(prof["discrim"]<MIN_DISCRIM)].sort_values("total",ascending=False)
+for _,r in bg.head(8).iterrows():
+    print(f"  {r['column'][:28]:28s} total={r['total']:>14,} discrim={r['discrim']:.2f}  <- 거의 모든 wafer 에 비슷")
