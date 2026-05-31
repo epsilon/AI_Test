@@ -43,6 +43,32 @@ except NameError: SKIP_TYPE_ROW = True       # 2번째 줄(타입행) skip
 try: WAFER_KEYS                              # 한 wafer(=tile 맥락)를 정의하는 칼럼
 except NameError: WAFER_KEYS = ["lotid", "waferseq", "item", "temp"]
 
+# 비교용 모드 ----------------------------------------------------------
+#   TILE_UNIT = "fail_type" : (wafer × fail_type) tile  — fail type 별 패턴
+#             = "axis"      : (wafer × axis 합성)  — wafer 당 axis 한 장 (wafer 검색용)
+#   VIEW_BY   = "lot"       : ALL + LOTID 별 뷰
+#             = "axis"      : fail_axis 별 뷰 (둘 비교할 땐 axis 권장)
+try: TILE_UNIT
+except NameError: TILE_UNIT = "fail_type"
+try: VIEW_BY
+except NameError: VIEW_BY = "lot"
+
+def fail_axis(c):
+    cl = c.lower()
+    if "bank" in cl or "halfbank" in cl or "bnk" in cl or "bkg" in cl or cl == "chip":
+        if "row" in cl: return "row(WL)"
+        if "col" in cl: return "col(BL)"
+        return "bank/chip"
+    if cl.startswith(("srow","frow","row","i_row","i_srow")): return "row(WL)"
+    if cl.startswith(("scol","fcol","col","i_col","i_scol")): return "col(BL)"
+    if cl.startswith(("fmat","block")): return "mat/block"
+    if cl.startswith(("bx2","by2","biso","snbrg","iso","i_iso","s_iso","s_snc",
+                      "s_nfc","ee_","oe_","oo_","eo_","snc","sn_","triple","single","dual")):
+        return "bridge/iso"
+    if cl.startswith(("g_","mfm","nfc")): return "geometry/etc"
+    if cl.startswith(("i_bit","i_group","group")): return "bit/group"
+    return "other"
+
 try: TOP_FAIL_TYPES                          # 총합 상위 N개 fail type 만 사용 (Pareto)
 except NameError: TOP_FAIL_TYPES = 40
 
@@ -241,6 +267,18 @@ def tile_features(xs, ys, v, cx, cy, R):
     return np.array(feats, float), rad, aniso, moran, cen_off
 
 # build tiles
+if TILE_UNIT == "axis":
+    from collections import OrderedDict
+    grp = OrderedDict()
+    for c in use_types:
+        grp.setdefault(fail_axis(c), []).append(c)
+    units = [(ax, cols) for ax, cols in grp.items()]
+    print(f"TILE_UNIT=axis → wafer 당 {len(units)} 합성 맵: "
+          + ", ".join(f"{ax}({len(cols)})" for ax, cols in units))
+else:
+    units = [(ft, [ft]) for ft in use_types]
+    print(f"TILE_UNIT=fail_type → wafer 당 최대 {len(units)} tile")
+
 print("extracting tiles...")
 records = []         # metadata + scalars
 F = []               # feature matrix
@@ -256,8 +294,9 @@ for keys, sub in df.groupby(wkeys, dropna=False, sort=True):
     R = np.sqrt((xs-cx)**2 + (ys-cy)**2).max() or 1.0
     pos_canon = [canon_idx[(int(a), int(b))] for a, b in pos]
 
-    for ft in use_types:
-        v = agg[ft].values.astype(float)
+    for label, cols in units:
+        v = (agg[cols].sum(axis=1).values if len(cols) > 1
+             else agg[cols[0]].values).astype(float)
         total = v.sum()
         cov = (v > 0).mean()
         if total < MIN_TOTAL or cov < MIN_COVERAGE:
@@ -267,10 +306,11 @@ for keys, sub in df.groupby(wkeys, dropna=False, sort=True):
         amap = np.zeros(NCAN, np.float32)
         amap[pos_canon] = (v / total).astype(np.float32)
         aligned_maps.append(amap)
+        ax = label if TILE_UNIT == "axis" else fail_axis(label)
         rec = dict(zip(wkeys, [str(k) for k in keys]))
-        rec.update(dict(fail_type=ft, n_fail=float(total), coverage=round(float(cov),3),
-                        aniso=round(aniso,3), moran=round(moran,3), cen_off=round(cen_off,3),
-                        radial=rad))
+        rec.update(dict(fail_type=label, axis=ax, n_fail=float(total),
+                        coverage=round(float(cov),3), aniso=round(aniso,3),
+                        moran=round(moran,3), cen_off=round(cen_off,3), radial=rad))
         records.append(rec)
 
 F = np.array(F)
@@ -410,21 +450,31 @@ gid2name = {cc["cid"]: cc["label"] for cc in all_view["clusters"]}
 for i, r in enumerate(records):
     r["cluster"] = int(glab[i]); r["label"] = gid2name[int(glab[i])]
 
-# per-LOTID views
-lot_key = cmap.get("lotid")
-if lot_key and lot_key in records[0]:
-    from collections import defaultdict
-    lot_idx = defaultdict(list)
+from collections import defaultdict
+if VIEW_BY == "axis":
+    # fail_axis 별 뷰
+    ax_idx = defaultdict(list)
     for i, r in enumerate(records):
-        lot_idx[r[lot_key]].append(i)
-    # tile 많은 LOT 우선, 최소 tile 이상만
-    lots = sorted([(lot, ix) for lot, ix in lot_idx.items() if len(ix) >= MIN_TILES_PER_VIEW],
-                  key=lambda kv: -len(kv[1]))[:MAX_LOT_VIEWS]
-    for lot, ix in lots:
-        print(f"clustering: LOT {lot}  ({len(ix)} tiles)")
-        views.append(run_view(f"LOT {lot}", ix))
+        ax_idx[r["axis"]].append(i)
+    groups = sorted([(a, ix) for a, ix in ax_idx.items() if len(ix) >= MIN_TILES_PER_VIEW],
+                    key=lambda kv: -len(kv[1]))
+    for a, ix in groups:
+        print(f"clustering: AXIS {a}  ({len(ix)} tiles)")
+        views.append(run_view(f"AXIS {a}", ix))
 else:
-    print("lotid 칼럼 없음 — per-lot 뷰 생략")
+    # per-LOTID 뷰
+    lot_key = cmap.get("lotid")
+    if lot_key and lot_key in records[0]:
+        lot_idx = defaultdict(list)
+        for i, r in enumerate(records):
+            lot_idx[r[lot_key]].append(i)
+        lots = sorted([(lot, ix) for lot, ix in lot_idx.items() if len(ix) >= MIN_TILES_PER_VIEW],
+                      key=lambda kv: -len(kv[1]))[:MAX_LOT_VIEWS]
+        for lot, ix in lots:
+            print(f"clustering: LOT {lot}  ({len(ix)} tiles)")
+            views.append(run_view(f"LOT {lot}", ix))
+    else:
+        print("lotid 칼럼 없음 — per-lot 뷰 생략")
 
 # 호환용 변수 (이후 코드)
 embed_method = all_view["embed"]; cluster_method = all_view["cluster"]
@@ -447,7 +497,7 @@ for i, r in enumerate(records):
 out_rows = []
 for r in records:
     row = {k: r[k] for k in wkeys}
-    row.update({"fail_type": r["fail_type"], "n_fail": int(r["n_fail"]),
+    row.update({"fail_type": r["fail_type"], "axis": r["axis"], "n_fail": int(r["n_fail"]),
                 "coverage": r["coverage"], "moran": r["moran"], "aniso": r["aniso"],
                 "cluster": r["cluster"], "label": r["label"]})
     out_rows.append(row)
