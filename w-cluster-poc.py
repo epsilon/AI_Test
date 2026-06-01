@@ -53,6 +53,19 @@ except NameError: TILE_UNIT = "fail_type"
 try: VIEW_BY
 except NameError: VIEW_BY = "lot"
 
+# featurization 전 die 값 변환:
+#   "raw"    : 원본 카운트 (큰 값 하나에 휘둘릴 수 있음)
+#   "log"    : log1p — 큰 값/작은 값 격차 완화 (시각화와 일치, 권장)
+#   "binary" : fail 유무만 (0/1) — 순수 위치 패턴
+try: VALUE_TRANSFORM
+except NameError: VALUE_TRANSFORM = "log"
+
+def transform_vals(v):
+    import numpy as _np
+    if VALUE_TRANSFORM == "log": return _np.log1p(v)
+    if VALUE_TRANSFORM == "binary": return (v > 0).astype(float)
+    return v
+
 def fail_axis(c):
     cl = c.lower()
     if "bank" in cl or "halfbank" in cl or "bnk" in cl or "bkg" in cl or cl == "chip":
@@ -301,7 +314,7 @@ for keys, sub in df.groupby(wkeys, dropna=False, sort=True):
         cov = (v > 0).mean()
         if total < MIN_TOTAL or cov < MIN_COVERAGE:
             continue
-        feat, rad, aniso, moran, cen_off = tile_features(xs, ys, v, cx, cy, R)
+        feat, rad, aniso, moran, cen_off = tile_features(xs, ys, transform_vals(v), cx, cy, R)
         F.append(feat)
         amap = np.zeros(NCAN, np.float32)
         amap[pos_canon] = (v / total).astype(np.float32)
@@ -584,7 +597,8 @@ img{{background:#fff;border-radius:4px}}
 <h1>WAFER FAIL PATTERN &mdash; CLUSTER CATALOG</h1>
 <div class="meta">
 files: {len(paths)} &middot; tiles: {len(F)} &middot; feature dim: {F.shape[1]} &middot; fail types: {len(use_types)} &middot; views: {len(views)} (ALL + per-LOT)<br>
-filter: coverage &ge; {MIN_COVERAGE}, total &ge; {MIN_TOTAL} &middot; wafer keys: {wkeys} &middot; mcs = n//{MCS_DIVISOR}
+filter: coverage &ge; {MIN_COVERAGE}, total &ge; {MIN_TOTAL} &middot; wafer keys: {wkeys} &middot; mcs = n//{MCS_DIVISOR}<br>
+unit: {TILE_UNIT} &middot; value transform: {VALUE_TRANSFORM} &middot; view by: {VIEW_BY}
 </div>
 <div class="viewbar"><label>view</label><select id="viewSel">{options}</select></div>
 {''.join(view_blocks)}
