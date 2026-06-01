@@ -1,8 +1,8 @@
 """
-wafer_cluster_poc.py — wafer fail pattern clustering PoC
+w_cluster_poc.py — wafer fail pattern clustering PoC
 
 목적:
-    (wafer × fail_type) 각각을 하나의 'tile' 로 보고, 공간 패턴 feature 를 뽑아
+    (w × fail_type) 각각을 하나의 'tile' 로 보고, 공간 패턴 feature 를 뽑아
     비슷한 패턴끼리 클러스터링한다. 결과 = signature 카탈로그.
 
 파이프라인:
@@ -481,6 +481,7 @@ embed_method = all_view["embed"]; cluster_method = all_view["cluster"]
 clusters = all_view["clusters"]
 
 # ---------- sparse tile data for interactive member maps ----------
+_lotk = cmap.get("lotid")
 POS = [[int(cxs[i]), int(cys[i])] for i in range(NCAN)]
 tiles_js = []
 for i, r in enumerate(records):
@@ -490,7 +491,9 @@ for i, r in enumerate(records):
     pairs = [[int(k), int(round(float(amap[k]) * total))] for k in nz]
     pairs = [pq for pq in pairs if pq[1] > 0]
     wid = " · ".join(str(r[k]) for k in wkeys)
-    tiles_js.append({"w": wid, "ft": r["fail_type"], "n": int(total), "nz": pairs})
+    lot = str(r[_lotk]) if _lotk and _lotk in r else "?"
+    tiles_js.append({"w": wid, "ft": r["fail_type"], "lot": lot,
+                     "n": int(total), "nz": pairs})
 
 
 # ---------- CSV ----------
@@ -564,6 +567,8 @@ img{{background:#fff;border-radius:4px}}
 .tile:hover canvas{{border-color:#b3460f}}
 .tile .cap{{font-size:9px;color:#5c6470;font-family:ui-monospace,monospace;margin-top:3px;line-height:1.3;word-break:break-word}}
 .more{{grid-column:1/-1;color:#5c6470;font-size:11px;font-family:ui-monospace,monospace;padding:6px;text-align:center}}
+.lothdr{{grid-column:1/-1;margin:8px 0 2px;padding:4px 8px;background:#efe7dd;border-left:3px solid #b3460f;
+        color:#7a3209;font-size:12px;font-weight:600;font-family:ui-monospace,monospace;border-radius:3px}}
 #modal{{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;align-items:center;justify-content:center}}
 #modal.open{{display:flex}}
 #modalBox{{background:#fff;border-radius:8px;padding:18px;text-align:center;max-width:90vw}}
@@ -628,16 +633,25 @@ document.querySelectorAll('.showbtn').forEach(btn=>{{
     if(open && !rendered[vk]){{
       rendered[vk]=true;
       const show=idxs.slice(0,MAX_SHOW);
+      // lotid 별로 그룹핑 (lot 내 tile 많은 순으로 lot 정렬)
+      const byLot={{}};
+      show.forEach(ti=>{{ const L=TILES[ti].lot; (byLot[L]=byLot[L]||[]).push(ti); }});
+      const lots=Object.keys(byLot).sort((a,b)=>byLot[b].length-byLot[a].length);
       const frag=document.createDocumentFragment();
-      show.forEach(ti=>{{
-        const t=TILES[ti];
-        const d=document.createElement('div'); d.className='tile';
-        const cv=document.createElement('canvas'); cv.width=108; cv.height=108;
-        const cap=document.createElement('div'); cap.className='cap';
-        cap.textContent=t.ft+'  ['+t.w+']';
-        d.appendChild(cv); d.appendChild(cap);
-        d.addEventListener('click',()=>openModal(t));
-        frag.appendChild(d); drawTile(cv, t);
+      lots.forEach(L=>{{
+        const hdr=document.createElement('div'); hdr.className='lothdr';
+        hdr.textContent='LOT '+L+'  ('+byLot[L].length+')';
+        frag.appendChild(hdr);
+        byLot[L].forEach(ti=>{{
+          const t=TILES[ti];
+          const d=document.createElement('div'); d.className='tile';
+          const cv=document.createElement('canvas'); cv.width=108; cv.height=108;
+          const cap=document.createElement('div'); cap.className='cap';
+          cap.textContent=t.ft+'  ['+t.w+']';
+          d.appendChild(cv); d.appendChild(cap);
+          d.addEventListener('click',()=>openModal(t));
+          frag.appendChild(d); drawTile(cv, t);
+        }});
       }});
       if(idxs.length>MAX_SHOW){{
         const m=document.createElement('div'); m.className='more';
