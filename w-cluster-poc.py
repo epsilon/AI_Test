@@ -481,7 +481,7 @@ embed_method = all_view["embed"]; cluster_method = all_view["cluster"]
 clusters = all_view["clusters"]
 
 # ---------- sparse tile data for interactive member maps ----------
-_lotk = cmap.get("lotid")
+_lotk = cmap.get("lotid"); _wsk = cmap.get("waferseq")
 POS = [[int(cxs[i]), int(cys[i])] for i in range(NCAN)]
 tiles_js = []
 for i, r in enumerate(records):
@@ -492,7 +492,8 @@ for i, r in enumerate(records):
     pairs = [pq for pq in pairs if pq[1] > 0]
     wid = " · ".join(str(r[k]) for k in wkeys)
     lot = str(r[_lotk]) if _lotk and _lotk in r else "?"
-    tiles_js.append({"w": wid, "ft": r["fail_type"], "lot": lot,
+    ws = str(r[_wsk]) if _wsk and _wsk in r else ""
+    tiles_js.append({"w": wid, "ft": r["fail_type"], "lot": lot, "ws": ws,
                      "n": int(total), "nz": pairs})
 
 
@@ -610,6 +611,18 @@ function heat(t){{
   const a=s[i],b=s[Math.min(i+1,s.length-1)];
   return `rgb(${{Math.round(a[0]+(b[0]-a[0])*f)}},${{Math.round(a[1]+(b[1]-a[1])*f)}},${{Math.round(a[2]+(b[2]-a[2])*f)}})`;
 }}
+function drawWaferId(ctx, W, H, ws){{
+  if(!ws) return;
+  const label='#'+ws;
+  const fs=Math.max(10, Math.min(Math.round(W*0.11), 20));
+  ctx.font='bold '+fs+'px ui-monospace,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='bottom';
+  const tw=ctx.measureText(label).width;
+  ctx.fillStyle='rgba(255,255,255,0.8)';
+  ctx.fillRect(W/2-tw/2-4, H-fs-5, tw+8, fs+4);
+  ctx.fillStyle='#7a3209';
+  ctx.fillText(label, W/2, H-3);
+}}
 function drawTile(cv, tile){{
   const ctx=cv.getContext('2d'), W=cv.width, H=cv.height;
   ctx.fillStyle='#eef0f2'; ctx.fillRect(0,0,W,H);
@@ -621,6 +634,7 @@ function drawTile(cv, tile){{
     const p=POS[idx]; ctx.fillStyle=heat(Math.log1p(c)/mx);
     ctx.fillRect((p[0]-XMIN)*cell,(YMAX-p[1])*cell,Math.ceil(cell),Math.ceil(cell));
   }}
+  drawWaferId(ctx, W, H, tile.ws);
 }}
 const rendered = {{}};
 document.querySelectorAll('.showbtn').forEach(btn=>{{
@@ -691,6 +705,7 @@ function drawModal(){{
       ctx.fillText(String(c), px+cell/2, py+cell/2);
     }}
   }}
+  drawWaferId(ctx, W, H, t.ws);
 }}
 document.getElementById('showNum').addEventListener('change',drawModal);
 (function(){{
